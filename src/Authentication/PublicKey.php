@@ -5,11 +5,11 @@ namespace Amp\Ssh\Authentication;
 use Amp\Cancellation;
 use function Amp\File\exists;
 use function Amp\File\read;
-use Amp\Ssh\Message\UserAuthFailure;
 use Amp\Ssh\Message\UserAuthPkOk;
 use Amp\Ssh\Message\UserAuthRequest;
 use Amp\Ssh\Message\UserAuthRequestAskPublicKey;
 use Amp\Ssh\Message\UserAuthRequestSignedPublicKey;
+use Amp\Ssh\Message\UserAuthSuccess;
 use Amp\Ssh\Transport\BinaryPacketHandler;
 
 final class PublicKey implements Authentication {
@@ -109,17 +109,20 @@ final class PublicKey implements Authentication {
         $handler->write($signatureRequest);
         $packet = $this->readMessage($handler, $cancellation);
 
-        // The server was willing to take this key and then turned the signature
-        // down, which is a different problem from not knowing the key at all.
-        if ($packet instanceof UserAuthFailure) {
+        if ($packet === null) {
+            throw new AuthenticationFailureException('Connection closed during authentication');
+        }
+
+        // Only SSH_MSG_USERAUTH_SUCCESS counts as being let in. The server was
+        // willing to take this key and then turned the signature down, which
+        // is a different problem from not knowing the key at all - and asking
+        // merely whether the reply was a failure would let anything else the
+        // server chose to send stand in for a yes.
+        if (!$packet instanceof UserAuthSuccess) {
             throw new AuthenticationFailureException(\sprintf(
                 'The server rejected the signature made with %s.',
                 $this->privateKeyPath
             ));
-        }
-
-        if ($packet === null) {
-            throw new AuthenticationFailureException('Connection closed during authentication');
         }
     }
 

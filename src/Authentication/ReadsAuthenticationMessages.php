@@ -3,10 +3,13 @@
 namespace Amp\Ssh\Authentication;
 
 use Amp\Cancellation;
+use Amp\Ssh\Message\Debug;
 use Amp\Ssh\Message\ExtInfo;
+use Amp\Ssh\Message\Ignore;
 use Amp\Ssh\Message\Message;
 use Amp\Ssh\Message\ServiceAccept;
 use Amp\Ssh\Message\ServiceRequest;
+use Amp\Ssh\Message\Unimplemented;
 use Amp\Ssh\Message\UserAuthBanner;
 use Amp\Ssh\Transport\BinaryPacketHandler;
 
@@ -88,6 +91,12 @@ trait ReadsAuthenticationMessages {
                 // replace one another.
                 $this->banner = ($this->banner ?? '') . $packet->message;
 
+                continue;
+            }
+
+            // RFC 4253 sections 11.2 to 11.4 let these arrive at any time, so
+            // they are noise here rather than an answer.
+            if ($packet instanceof Debug || $packet instanceof Ignore || $packet instanceof Unimplemented) {
                 continue;
             }
 

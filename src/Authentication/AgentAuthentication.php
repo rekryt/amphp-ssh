@@ -3,11 +3,11 @@
 namespace Amp\Ssh\Authentication;
 
 use Amp\Cancellation;
-use Amp\Ssh\Message\UserAuthFailure;
 use Amp\Ssh\Message\UserAuthPkOk;
 use Amp\Ssh\Message\UserAuthRequest;
 use Amp\Ssh\Message\UserAuthRequestAskPublicKey;
 use Amp\Ssh\Message\UserAuthRequestSignedPublicKey;
+use Amp\Ssh\Message\UserAuthSuccess;
 use Amp\Ssh\Transport\BinaryPacketHandler;
 
 /**
@@ -150,6 +150,8 @@ final class AgentAuthentication implements Authentication {
             throw new AuthenticationFailureException('Connection closed during authentication');
         }
 
-        return !$packet instanceof UserAuthFailure;
+        // Only an explicit success moves on to the next key; anything else,
+        // including whatever a server invents, counts as this key not working.
+        return $packet instanceof UserAuthSuccess;
     }
 }

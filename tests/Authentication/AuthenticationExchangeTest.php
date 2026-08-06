@@ -5,7 +5,10 @@ namespace Amp\Ssh\Tests\Authentication;
 use Amp\PHPUnit\AsyncTestCase;
 use Amp\Ssh\Authentication\AuthenticationFailureException;
 use Amp\Ssh\Authentication\UsernamePassword;
+use Amp\Ssh\Message\Debug;
+use Amp\Ssh\Message\Ignore;
 use Amp\Ssh\Message\ServiceAccept;
+use Amp\Ssh\Message\Unimplemented;
 use Amp\Ssh\Message\UserAuthBanner;
 use Amp\Ssh\Message\UserAuthFailure;
 use Amp\Ssh\Message\UserAuthSuccess;
@@ -103,6 +106,41 @@ class AuthenticationExchangeTest extends AsyncTestCase {
         $this->authenticateAgainst([$this->serviceAccepted(), new UserAuthSuccess()], $quiet);
 
         self::assertNull($quiet->getBanner());
+    }
+
+    /**
+     * Only SSH_MSG_USERAUTH_SUCCESS means we are in.
+     *
+     * The check used to ask whether the reply was a failure, which made
+     * everything else a yes - and the server picks what it sends. RFC 4253
+     * sections 11.2 to 11.4 let DEBUG, IGNORE and UNIMPLEMENTED arrive at any
+     * time, so a server could answer the password with one of those and be
+     * believed. They are skipped now, and the answer that follows decides.
+     *
+     * @dataProvider messagesThatAreNotAnAnswer
+     */
+    public function testAMessageThatIsNotAnAnswerIsNotAcceptance(object $noise) {
+        $this->expectException(AuthenticationFailureException::class);
+
+        $this->authenticateAgainst(
+            [$this->serviceAccepted(), $noise, $this->rejection()],
+            new UsernamePassword('root', 'the wrong password')
+        );
+    }
+
+    public function messagesThatAreNotAnAnswer(): array {
+        $debug = new Debug();
+        $debug->alwaysDisplay = false;
+        $debug->message = 'nothing to see here';
+        $debug->languageTag = 'en';
+
+        $ignore = new Ignore();
+        $ignore->data = 'padding';
+
+        $unimplemented = new Unimplemented();
+        $unimplemented->sequenceNumber = 1;
+
+        return ['debug' => [$debug], 'ignore' => [$ignore], 'unimplemented' => [$unimplemented]];
     }
 
     /**

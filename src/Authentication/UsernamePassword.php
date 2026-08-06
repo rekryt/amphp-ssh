@@ -3,8 +3,8 @@
 namespace Amp\Ssh\Authentication;
 
 use Amp\Cancellation;
-use Amp\Ssh\Message\UserAuthFailure;
 use Amp\Ssh\Message\UserAuthRequestPassword;
+use Amp\Ssh\Message\UserAuthSuccess;
 use Amp\Ssh\Transport\BinaryPacketHandler;
 
 final class UsernamePassword implements Authentication {
@@ -34,12 +34,16 @@ final class UsernamePassword implements Authentication {
         $handler->write($userAuthRequest);
         $packet = $this->readMessage($handler, $cancellation);
 
-        if ($packet instanceof UserAuthFailure) {
-            throw new AuthenticationFailureException('Authentication failure');
-        }
-
         if ($packet === null) {
             throw new AuthenticationFailureException('Connection closed during authentication');
+        }
+
+        // Nothing but SSH_MSG_USERAUTH_SUCCESS means we are in. Asking instead
+        // whether the reply was a failure treats everything else as a yes -
+        // and a server chooses what it sends, so that let one say "authorised"
+        // without ever accepting the password.
+        if (!$packet instanceof UserAuthSuccess) {
+            throw new AuthenticationFailureException('The server rejected the password');
         }
     }
 }
