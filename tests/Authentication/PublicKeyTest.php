@@ -80,17 +80,19 @@ class PublicKeyTest extends IntegrationTestCase {
     }
 
     /**
-     * An ECDSA key is read and offered like any other.
+     * ECDSA client keys, which 1.x could not use at all.
      *
-     * This used to assert that ECDSA was unsupported, which it no longer is.
-     * What it shows now is that the key loads and gets as far as the server,
-     * which refuses it because tests/key_ecdsa is not in authorized_keys -
-     * PublicKeyNotAcceptedException, a subclass of the failure expected here.
-     * A parse error or an unsupported curve would not reach that point.
+     * This asserted the opposite until now - that an ECDSA key was refused -
+     * and went on passing after support was added, because the refusal it saw
+     * was the server not knowing the key rather than the client failing to use
+     * it. The test container does install tests/key_ecdsa.pub, so the two
+     * reasons finally came apart and the stale expectation failed.
      */
-    public function testEcdsa() {
-        $this->expectException(AuthenticationFailureException::class);
+    public function testEcdsaSuccess() {
+        $sshResource = $this->connectWithInstalledKey('key_ecdsa');
 
-        $this->connectWithKey('key_ecdsa');
+        self::assertInstanceOf(SshResource::class, $sshResource);
+
+        $sshResource->close();
     }
 }
