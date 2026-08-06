@@ -1,9 +1,7 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh;
 
-use function Amp\call;
-use Amp\Promise;
 use Amp\Ssh\Channel\Dispatcher;
 use Amp\Ssh\Channel\Session;
 use Amp\Ssh\Message\Disconnect;
@@ -13,11 +11,11 @@ use Amp\Ssh\Transport\BinaryPacketHandler;
  * @internal
  */
 class SshResource {
-    private $handler;
+    private BinaryPacketHandler $handler;
 
-    private $dispatcher;
+    private Dispatcher $dispatcher;
 
-    private $running = true;
+    private bool $running = true;
 
     public function __construct(BinaryPacketHandler $handler, Dispatcher $dispatcher) {
         $this->handler = $handler;
@@ -28,20 +26,35 @@ class SshResource {
         return $this->dispatcher->createSession();
     }
 
-    public function close(): Promise {
-        return call(function () {
-            $this->running = false;
-            $this->dispatcher->close();
+    /**
+     * Orderly shutdown.
+     *
+     * Channels are completed first, so consumers see a clean end of stream
+     * rather than an error - the distinction the whole channel lifecycle rests
+     * on. Only then is SSH_MSG_DISCONNECT sent and the socket closed.
+     */
+    public function close(): void {
+        if (!$this->running) {
+            return;
+        }
 
-            yield $this->handler->write(new Disconnect);
+        $this->running = false;
+        $this->dispatcher->close();
 
-            $this->handler->close();
-        });
+        try {
+            $this->handler->write(new Disconnect());
+        } catch (\Throwable) {
+            // The peer may already be gone; closing is still the right move.
+        }
+
+        $this->handler->close();
+    }
+
+    public function isClosed(): bool {
+        return !$this->running;
     }
 
     public function __destruct() {
-        if ($this->running) {
-            $this->close();
-        }
+        $this->close();
     }
 }

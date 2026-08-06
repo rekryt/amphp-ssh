@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Message;
 
@@ -9,11 +9,20 @@ use function Amp\Ssh\Transport\read_string;
  * @internal
  */
 final class KeyExchangeCurveReply implements Message {
+    /** Full host key blob, exactly as it goes into the exchange hash. */
     public $hostKey;
+
     public $hostKeyFormat;
+
     public $fBytes;
+
+    /** Full signature blob: the format name followed by the signature. */
     public $signature;
+
     public $signatureFormat;
+
+    /** The signature itself, without the format name in front of it. */
+    public $signatureBlob;
 
     public function encode(): string {
         throw new \RuntimeException('Not implemented');
@@ -34,6 +43,7 @@ final class KeyExchangeCurveReply implements Message {
         // Read signature
         $signature = $message->signature = read_string($payload);
         $message->signatureFormat = read_string($signature);
+        $message->signatureBlob = read_string($signature);
 
         return $message;
     }

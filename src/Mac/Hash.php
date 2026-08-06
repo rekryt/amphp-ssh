@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Mac;
 
@@ -24,7 +24,7 @@ final class Hash implements Mac {
         return $this->length;
     }
 
-    public function setKey(string $key) {
+    public function setKey(string $key): void {
         $this->key = $key;
     }
 

@@ -1,50 +1,46 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Message;
 
+use Amp\Ssh\Internal\Signals;
 use function Amp\Ssh\Transport\read_boolean;
 use function Amp\Ssh\Transport\read_string;
 
 /**
+ * A server reporting that a command died from a signal rather than exiting.
+ *
  * @internal
  */
 final class ChannelRequestExitSignal extends ChannelRequest {
+    /** Local signal number, or null for a name this platform does not know. */
     public $signal;
 
-    public $coreDumped;
+    /** The name as it travelled, which is what the RFC actually defines. */
+    public string $signalName = '';
 
-    public $errorMessage;
+    public $coreDumped = false;
 
-    public $languageTag;
+    public $errorMessage = '';
 
-    private $signalMapping = [
-        SIGABRT => 'ABRT',
-        SIGALRM => 'ALRM',
-        SIGFPE => 'FPE',
-        SIGHUP => 'HUP',
-        SIGILL => 'ILL',
-        SIGINT => 'INT',
-        SIGKILL => 'KILL',
-        SIGPIPE => 'PIPE',
-        SIGQUIT => 'QUIT',
-        SIGSEGV => 'SEGV',
-        SIGTERM => 'TERM',
-        SIGUSR1 => 'USR1',
-        SIGUSR2 => 'USR2',
-    ];
+    public $languageTag = '';
 
     public function encode(): string {
-        $signal = \is_int($this->signal) ? $this->signalMapping[$this->signal] : $this->signal;
+        $signal = \is_int($this->signal) ? Signals::name($this->signal) : $this->signal;
+        $signal = (string) ($signal ?? $this->signalName);
 
+        // Four fields follow the request header, and the format has to name
+        // every one of them: 'Na*C' silently dropped the error message and the
+        // language tag, because pack() ignores arguments the format runs out
+        // of room for.
         return parent::encode() . \pack(
-            'Na*C',
+            'Na*CNa*Na*',
             \strlen($signal),
             $signal,
-            $this->coreDumped,
-            \strlen($this->errorMessage),
-            $this->errorMessage,
-            \strlen($this->languageTag),
-            $this->languageTag
+            (int) $this->coreDumped,
+            \strlen((string) $this->errorMessage),
+            (string) $this->errorMessage,
+            \strlen((string) $this->languageTag),
+            (string) $this->languageTag
         );
     }
 
@@ -53,8 +49,8 @@ final class ChannelRequestExitSignal extends ChannelRequest {
     }
 
     protected function decodeExtraData($extraPayload) {
-        $signal = read_string($extraPayload);
-        $this->signal = \current(\array_keys($this->signalMapping, $signal));
+        $this->signalName = read_string($extraPayload);
+        $this->signal = Signals::number($this->signalName);
         $this->coreDumped = read_boolean($extraPayload);
         $this->errorMessage = read_string($extraPayload);
         $this->languageTag = read_string($extraPayload);

@@ -1,49 +1,80 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Channel;
 
-use Amp\ByteStream\InputStream;
-use function Amp\call;
-use Amp\Iterator;
-use Amp\Promise;
+use Amp\ByteStream\ReadableStream;
+use Amp\ByteStream\ReadableStreamIteratorAggregate;
+use Amp\Cancellation;
+use Amp\DeferredFuture;
+use Amp\Pipeline\ConcurrentIterator;
 use Amp\Ssh\Message\ChannelData;
 use Amp\Ssh\Message\ChannelExtendedData;
-use Amp\Success;
 
 /**
+ * Adapts one of a channel's data queues to a readable stream.
+ *
+ * @implements \IteratorAggregate<int, string>
+ *
  * @internal
  */
-final class ChannelInputStream implements InputStream {
-    private $readable = true;
+final class ChannelInputStream implements ReadableStream, \IteratorAggregate {
+    use ReadableStreamIteratorAggregate;
 
-    private $iterator;
+    private bool $readable = true;
 
-    public function __construct(Iterator $iterator) {
+    private ConcurrentIterator $iterator;
+
+    private DeferredFuture $onClose;
+
+    public function __construct(ConcurrentIterator $iterator) {
         $this->iterator = $iterator;
+        $this->onClose = new DeferredFuture();
     }
 
-    /** {@inheritdoc} */
-    public function read(): Promise {
+    public function read(?Cancellation $cancellation = null): ?string {
         if (!$this->readable) {
-            return new Success; // Resolve with null on closed stream.
+            return null;
         }
 
-        return call(function () {
-            $advanced = yield $this->iterator->advance();
+        if (!$this->iterator->continue($cancellation)) {
+            $this->close();
 
-            if (!$advanced) {
-                $this->readable = false;
+            return null;
+        }
 
-                return null;
-            }
+        $message = $this->iterator->getValue();
 
-            $message = $this->iterator->getCurrent();
+        if ($message instanceof ChannelData || $message instanceof ChannelExtendedData) {
+            return $message->data;
+        }
 
-            if ($message instanceof ChannelData || $message instanceof ChannelExtendedData) {
-                return $message->data;
-            }
+        return $message;
+    }
 
-            return $message;
-        });
+    public function isReadable(): bool {
+        return $this->readable;
+    }
+
+    /**
+     * Marks this side as finished without disposing the queue.
+     *
+     * The channel owns the queue and the iterator; disposing here would break
+     * the producer for every other consumer of the same channel.
+     */
+    public function close(): void {
+        if (!$this->readable) {
+            return;
+        }
+
+        $this->readable = false;
+        $this->onClose->complete();
+    }
+
+    public function isClosed(): bool {
+        return !$this->readable;
+    }
+
+    public function onClose(\Closure $onClose): void {
+        $this->onClose->getFuture()->finally($onClose);
     }
 }

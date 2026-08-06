@@ -1,158 +1,229 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh;
 
-use function Amp\asyncCall;
-use Amp\ByteStream\InputStream;
-use Amp\ByteStream\OutputStream;
-use function Amp\call;
-use Amp\Deferred;
-use Amp\Failure;
-use Amp\Promise;
+use function Amp\async;
+use Amp\ByteStream\ReadableStream;
+use Amp\ByteStream\WritableStream;
+use Amp\Cancellation;
+use Amp\DeferredFuture;
+use Amp\Future;
 use Amp\Ssh\Channel\ChannelInputStream;
 use Amp\Ssh\Channel\ChannelOutputStream;
 use Amp\Ssh\Message\ChannelRequestExitStatus;
-use Amp\Success;
 
 class Process {
-    /** @var Channel\Session */
-    private $session;
+    /**
+     * SIGKILL, spelled out because the constant only exists with ext-pcntl,
+     * which this package does not require. Referencing it directly made kill()
+     * fatal on any build without that extension.
+     */
+    private const SIGKILL = 9;
 
-    /** @var string */
-    private $command;
+    private Channel\Session $session;
 
-    /** @var ChannelInputStream */
-    private $stderr;
+    private string $command;
 
-    /** @var ChannelInputStream */
-    private $stdout;
+    private ChannelInputStream $stderr;
 
-    /** @var ChannelOutputStream */
-    private $stdin;
+    private ChannelInputStream $stdout;
 
-    /** @var int */
-    private $exitCode;
+    private ChannelOutputStream $stdin;
 
-    /** @var Deferred */
-    private $resolved;
+    private int|false|null $exitCode = null;
 
-    /** @var bool */
-    private $open = false;
+    private ?\Throwable $failure = null;
 
-    /** @var array */
-    private $env;
+    private bool $finished = false;
 
-    public function __construct(SshResource $sshResource, string $command, string $cwd = null, array $env = []) {
+    private ?DeferredFuture $deferred = null;
+
+    private bool $open = false;
+
+    private array $env;
+
+    private ?Future $requestHandler = null;
+
+    /**
+     * @param string|null $cwd Directory to run in, taken literally: it is
+     *                         quoted for the remote shell, so a space or a
+     *                         quote in it is part of the name and a semicolon
+     *                         cannot start a command of its own. Nothing in it
+     *                         is expanded either, so "~" and "$HOME" are
+     *                         directory names rather than your home directory -
+     *                         leave $cwd null to run there.
+     *                         The command keeps its own meaning: it is shell
+     *                         text and is not quoted.
+     */
+    public function __construct(SshResource $sshResource, string $command, ?string $cwd = null, array $env = []) {
         $this->session = $sshResource->createSession();
-        $this->handleRequests();
-        $this->command = $cwd !== null ? \sprintf('cd %s; %s', $cwd, $command) : $command;
-        $this->stdout = new ChannelInputStream($this->session->getDataEmitter()->iterate());
-        $this->stderr = new ChannelInputStream($this->session->getDataExtendedEmitter()->iterate());
+
+        // && rather than ;, so a directory that cannot be entered stops the
+        // command instead of running it wherever the login started.
+        $this->command = $cwd !== null
+            ? \sprintf('cd %s && %s', self::quote($cwd), $command)
+            : $command;
+        $this->stdout = new ChannelInputStream($this->session->getDataIterator());
+        $this->stderr = new ChannelInputStream($this->session->getDataExtendedIterator());
         $this->stdin = new ChannelOutputStream($this->session);
         $this->env = $env;
+
+        $this->handleRequests();
     }
 
-    public function __destruct() {
-        if ($this->isRunning()) {
-            $this->kill();
-        }
+    /**
+     * Wraps a value so the remote shell reads it as one literal word.
+     *
+     * Single quotes suspend every kind of expansion a POSIX shell performs,
+     * and the only character they cannot hold is the single quote itself -
+     * which is closed, escaped and reopened, the usual '\'' dance.
+     *
+     * escapeshellarg() cannot be used for this. It quotes for the platform PHP
+     * is running on, and on Windows that means double quotes and a different
+     * set of rules altogether - while the string is going to be read by a shell
+     * on the other end of the connection, which is a POSIX one.
+     */
+    private static function quote(string $value): string {
+        return "'" . \str_replace("'", "'\\''", $value) . "'";
     }
 
-    public function start(): Promise {
-        if ($this->resolved !== null || $this->exitCode !== null) {
-            return new Failure(new StatusError('Process has already been started.'));
+    public function start(): void {
+        if ($this->deferred !== null) {
+            throw new StatusError('Process has already been started.');
         }
 
-        $this->resolved = new Deferred();
+        if ($this->finished) {
+            throw new StatusError('Process channel is already closed.');
+        }
 
-        return call(function () {
-            try {
-                if (!$this->open) {
-                    yield $this->session->open();
+        $this->deferred = new DeferredFuture();
 
-                    $this->open = true;
-                }
+        try {
+            if (!$this->open) {
+                $this->session->open();
 
-                foreach ($this->env as $key => $value) {
-                    yield $this->session->env($key, $value);
-                }
-
-                yield $this->session->exec($this->command);
-            } catch (\Exception $exception) {
-                $this->resolved = null;
-                throw $exception;
+                $this->open = true;
             }
-        });
+
+            foreach ($this->env as $key => $value) {
+                $this->session->env((string) $key, (string) $value);
+            }
+
+            $this->session->exec($this->command);
+        } catch (\Throwable $exception) {
+            $this->deferred = null;
+
+            throw $exception;
+        }
     }
 
-    public function join(): Promise {
+    /**
+     * Wait for the remote process to exit.
+     *
+     * Returns the exit status, or false when the server closed the channel
+     * without sending one.
+     *
+     * Cancelling detaches this caller and nothing else: the process keeps
+     * running, the channel stays open, and calling join() again waits for the
+     * same result. Terminating the process is an explicit signal()/kill().
+     */
+    public function join(?Cancellation $cancellation = null): int|false {
+        if ($this->failure !== null) {
+            throw $this->failure;
+        }
+
         if ($this->exitCode !== null) {
-            return new Success($this->exitCode);
+            return $this->exitCode;
         }
 
-        if ($this->resolved === null) {
-            return new Failure(new StatusError('Process has not been started.'));
+        if ($this->deferred === null) {
+            throw new StatusError('Process has not been started.');
         }
 
-        return $this->resolved->promise();
+        return $this->deferred->getFuture()->await($cancellation);
     }
 
-    public function kill() {
-        Promise\rethrow($this->signal(SIGKILL));
+    public function kill(): void {
+        $this->signal(self::SIGKILL);
     }
 
-    public function signal(int $signo): Promise {
+    public function signal(int $signo): void {
         if (!$this->isRunning()) {
-            return new Failure(new StatusError('Process is not running.'));
+            throw new StatusError('Process is not running.');
         }
 
-        return $this->session->signal($signo);
+        $this->session->signal($signo);
     }
 
-    public function isRunning() {
-        return $this->resolved !== null;
+    public function isRunning(): bool {
+        return $this->deferred !== null && !$this->finished;
     }
 
-    public function getStdin(): OutputStream {
+    public function getStdin(): WritableStream {
         return $this->stdin;
     }
 
-    public function getStdout(): InputStream {
+    public function getStdout(): ReadableStream {
         return $this->stdout;
     }
 
-    public function getStderr(): InputStream {
+    public function getStderr(): ReadableStream {
         return $this->stderr;
     }
 
-    private function handleRequests() {
-        asyncCall(function () {
-            $requestIterator = $this->session->getRequestEmitter()->iterate();
+    /**
+     * Watch the channel for the exit status.
+     *
+     * Runs for the whole life of the channel and deliberately never breaks out
+     * of the loop: abandoning the iterator early would dispose the queue and
+     * make the channel's producer fail.
+     */
+    private function handleRequests(): void {
+        $this->requestHandler = async(function (): void {
+            $iterator = $this->session->getRequestIterator();
 
             try {
-                while (yield $requestIterator->advance()) {
-                    $message = $requestIterator->getCurrent();
+                while ($iterator->continue()) {
+                    $message = $iterator->getValue();
 
                     if ($message instanceof ChannelRequestExitStatus) {
-                        $resolved = $this->resolved;
-                        $this->resolved = null;
-                        $this->exitCode = $message->code;
-                        $resolved->resolve($message->code);
+                        $this->complete($message->code);
                     }
                 }
-                // some servers does not send exit status
-                if ($this->resolved) {
-                    $this->resolved->resolve(false);
-                    $this->exitCode = false;
-                    $this->resolved = null;
-                }
-            } catch (\Exception $exception) {
-                if ($this->resolved) {
-                    $resolved = $this->resolved;
-                    $this->resolved = null;
-                    $resolved->fail($exception);
-                }
+
+                // Some servers never send an exit status.
+                $this->complete(false);
+            } catch (\Throwable $exception) {
+                $this->fail($exception);
             }
         });
+    }
+
+    private function complete(int|false $exitCode): void {
+        if ($this->finished) {
+            return;
+        }
+
+        $this->finished = true;
+        $this->exitCode = $exitCode;
+        $this->deferred?->complete($exitCode);
+    }
+
+    private function fail(\Throwable $exception): void {
+        if ($this->finished) {
+            return;
+        }
+
+        $this->finished = true;
+        $this->failure = $exception;
+
+        if ($this->deferred !== null) {
+            $this->deferred->error($exception);
+
+            // join() rethrows from $failure, so nobody may ever await this
+            // future. Without ignore() an unawaited errored future reports an
+            // UnhandledFutureError to the event loop when it is collected.
+            $this->deferred->getFuture()->ignore();
+        }
     }
 }

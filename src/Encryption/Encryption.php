@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Encryption;
 
@@ -14,5 +14,5 @@ interface Encryption {
 
     public function getName(): string;
 
-    public function resetEncrypt(string $key, string $initIv);
+    public function resetEncrypt(string $key, string $initIv): void;
 }

@@ -1,9 +1,8 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\KeyExchange;
 
-use function Amp\call;
-use Amp\Promise;
+use Amp\Cancellation;
 use Amp\Ssh\Message\KeyExchangeCurveInit;
 use Amp\Ssh\Message\KeyExchangeCurveReply;
 use Amp\Ssh\Message\Message;
@@ -19,14 +18,9 @@ final class DiffieHellmanGroup implements KeyExchange {
 
     const GROUP18 = 18;
 
-    /**
-     * @var int
-     */
-    private $group;
-    /**
-     * @var string
-     */
-    private $hash;
+    private int $group;
+
+    private string $hash;
 
     public function __construct(int $group, string $hash) {
         $this->group = $group;
@@ -37,42 +31,39 @@ final class DiffieHellmanGroup implements KeyExchange {
         return 'diffie-hellman-group' . $this->group . '-' . $this->hash;
     }
 
-    public function exchange(BinaryPacketHandler $handler): Promise {
-        return call(function () use ($handler) {
-            $prime = $this->getPrime();
+    public function exchange(BinaryPacketHandler $handler, ?Cancellation $cancellation = null): array {
+        $prime = $this->getPrime();
 
-            $dhKey = \openssl_pkey_new([
-                'dh' => [
-                    'p' => \hex2bin($prime),
-                    'g' => \chr(2),
-                ]
-            ]);
-            $details = \openssl_pkey_get_details($dhKey);
-            $eBytes = $details['dh']['pub_key'];
+        $dhKey = \openssl_pkey_new([
+            'dh' => [
+                'p' => \hex2bin($prime),
+                'g' => \chr(2),
+            ]
+        ]);
+        $details = \openssl_pkey_get_details($dhKey);
+        $eBytes = $details['dh']['pub_key'];
 
-            $message = new KeyExchangeCurveInit();
-            $message->exchange = twos_compliment($eBytes);
+        $message = new KeyExchangeCurveInit();
+        $message->exchange = twos_compliment($eBytes);
 
-            yield $handler->write($message);
-            $packet = yield $handler->read();
+        $handler->write($message);
+        $packet = $handler->read($cancellation);
 
-            if (!$packet instanceof KeyExchangeCurveReply) {
-                throw new \RuntimeException('Invalid reply');
-            }
+        if (!$packet instanceof KeyExchangeCurveReply) {
+            throw new \RuntimeException('Invalid reply');
+        }
 
-            $key = \openssl_dh_compute_key($packet->fBytes, $dhKey);
+        $key = \openssl_dh_compute_key($packet->fBytes, $dhKey);
 
-            \sodium_memzero($details['dh']['priv_key']);
-            unset($details, $dhKey);
+        \sodium_memzero($details['dh']['priv_key']);
+        unset($details, $dhKey);
 
-
-            return [twos_compliment($key), $message, $packet];
-        });
+        return [twos_compliment($key), $message, $packet];
     }
 
-    private function getPrime() {
+    private function getPrime(): string {
         switch ($this->group) {
-            case  self::GROUP14:
+            case self::GROUP14:
                 return
                     'FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1' .
                     '29024E088A67CC74020BBEA63B139B22514A08798E3404DD' .
@@ -164,7 +155,7 @@ final class DiffieHellmanGroup implements KeyExchange {
         return \hash($this->hash, $payload, true);
     }
 
-    public function getEBytes(Message $message) {
+    public function getEBytes(Message $message): string {
         if (!$message instanceof KeyExchangeCurveInit) {
             throw new \RuntimeException();
         }
@@ -172,7 +163,7 @@ final class DiffieHellmanGroup implements KeyExchange {
         return $message->exchange;
     }
 
-    public function getFBytes(Message $message) {
+    public function getFBytes(Message $message): string {
         if (!$message instanceof KeyExchangeCurveReply) {
             throw new \RuntimeException();
         }
@@ -180,7 +171,7 @@ final class DiffieHellmanGroup implements KeyExchange {
         return $message->fBytes;
     }
 
-    public function getHostKey(Message $message) {
+    public function getHostKey(Message $message): string {
         if (!$message instanceof KeyExchangeCurveReply) {
             throw new \RuntimeException();
         }
@@ -188,12 +179,25 @@ final class DiffieHellmanGroup implements KeyExchange {
         return $message->hostKey;
     }
 
-    public static function create() {
+    /**
+     * @return self[]
+     */
+    /**
+     * Largest group and strongest hash first.
+     *
+     * Negotiation takes the first name both sides offer, so this list is a
+     * preference order. group14-sha1 used to lead it, which meant picking a
+     * 2048-bit group with SHA-1 even against a server that offered group18
+     * with SHA-512.
+     *
+     * @return self[]
+     */
+    public static function create(): array {
         return [
-            new static(static::GROUP14, 'sha1'),
-            new static(static::GROUP14, 'sha256'),
-            new static(static::GROUP16, 'sha512'),
             new static(static::GROUP18, 'sha512'),
+            new static(static::GROUP16, 'sha512'),
+            new static(static::GROUP14, 'sha256'),
+            new static(static::GROUP14, 'sha1'),
         ];
     }
 }

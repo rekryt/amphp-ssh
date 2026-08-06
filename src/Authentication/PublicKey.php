@@ -1,11 +1,10 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Authentication;
 
-use function Amp\call;
+use Amp\Cancellation;
 use function Amp\File\exists;
-use function Amp\File\get;
-use Amp\Promise;
+use function Amp\File\read;
 use Amp\Ssh\Message\ServiceRequest;
 use Amp\Ssh\Message\UserAuthFailure;
 use Amp\Ssh\Message\UserAuthPkOk;
@@ -15,108 +14,158 @@ use Amp\Ssh\Message\UserAuthRequestSignedPublicKey;
 use Amp\Ssh\Transport\BinaryPacketHandler;
 
 final class PublicKey implements Authentication {
-    private $privateKeyPath;
+    use HandlesExtInfo;
 
-    private $username;
+    private string $privateKeyPath;
 
-    private $passphrase;
+    private string $username;
 
-    public function __construct(string $username, string $privateKeyPath = '~/.ssh/id_rsa', string $passphrase = '') {
+    private string $passphrase;
+
+    private ?string $certificatePath;
+
+    /**
+     * @param string|null $certificatePath A user certificate to present with
+     *                                     the key. Defaults to the OpenSSH
+     *                                     convention of "<key>-cert.pub" beside
+     *                                     the private key, when that exists.
+     */
+    public function __construct(
+        string $username,
+        string $privateKeyPath = '~/.ssh/id_rsa',
+        string $passphrase = '',
+        ?string $certificatePath = null
+    ) {
         $this->username = $username;
         $this->privateKeyPath = $privateKeyPath;
         $this->passphrase = $passphrase;
+        $this->certificatePath = $certificatePath;
     }
 
-    public function authenticate(BinaryPacketHandler $handler, string $sessionId): Promise {
-        return call(function () use ($handler, $sessionId) {
-            if (!yield exists($this->privateKeyPath)) {
-                throw new AuthenticationFailureException('Private key does not exist at path: ' . $this->privateKeyPath);
-            }
+    public function authenticate(
+        BinaryPacketHandler $handler,
+        string $sessionId,
+        ?Cancellation $cancellation = null
+    ): void {
+        if (!exists($this->privateKeyPath)) {
+            throw new AuthenticationFailureException('Private key does not exist at path: ' . $this->privateKeyPath);
+        }
 
-            $fileContent = yield get($this->privateKeyPath);
-            $key = \openssl_get_privatekey($fileContent, $this->passphrase);
+        $key = PrivateKeyLoader::load(read($this->privateKeyPath), $this->passphrase);
+        $key = $this->withCertificate($key);
 
-            if ($key === false) {
-                throw new AuthenticationFailureException('Cannot get private key (maybe wrong passphrase ?)');
-            }
+        $authServiceRequest = new ServiceRequest();
+        $authServiceRequest->serviceName = 'ssh-userauth';
 
-            $details = \openssl_pkey_get_details($key);
+        $handler->write($authServiceRequest);
 
-            if ($details['type'] === OPENSSL_KEYTYPE_RSA) {
-                return yield $this->rsa($handler, $key, $details, $sessionId);
-            }
+        // The server's EXT_INFO arrives around here; readMessage() absorbs it,
+        // which is what lets the key pick an algorithm the server will take.
+        $this->readMessage($handler, $cancellation);
 
-            throw new AuthenticationFailureException('Private Key Format is not supported.');
-        });
+        $algorithm = $key->getSignatureAlgorithm($this->serverSignatureAlgorithms);
+        $publicKey = $key->getPublicKeyBlob();
+
+        $request = new UserAuthRequestAskPublicKey();
+        $request->username = $this->username;
+        $request->authType = UserAuthRequest::TYPE_PUBLIC_KEY;
+        $request->keyAlgorithm = $algorithm;
+        $request->keyBlob = $publicKey;
+
+        $handler->write($request);
+
+        // The offer is refused before anything is signed, so this says the key
+        // is unknown to the server rather than that the key is broken.
+        if (!$this->readMessage($handler, $cancellation) instanceof UserAuthPkOk) {
+            throw new PublicKeyNotAcceptedException(\sprintf(
+                'The server does not accept the public key in %s for user %s: '
+                    . 'it is not in authorized_keys, or its algorithm is not permitted.',
+                $this->privateKeyPath,
+                $this->username
+            ));
+        }
+
+        $signatureRequest = new UserAuthRequestSignedPublicKey();
+        $signatureRequest->username = $this->username;
+        $signatureRequest->authType = UserAuthRequest::TYPE_PUBLIC_KEY;
+        $signatureRequest->keyAlgorithm = $algorithm;
+        $signatureRequest->keyBlob = $publicKey;
+
+        // What gets signed is the session identifier followed by the request
+        // as it will go out, minus the signature itself.
+        $signatureRaw = \pack(
+            'Na*a*',
+            \strlen($sessionId),
+            $sessionId,
+            $signatureRequest->encode()
+        );
+
+        $signature = $key->sign($signatureRaw, $algorithm);
+        $signatureFormat = $key->getSignatureFormat($algorithm);
+
+        $signatureRequest->signature = \pack(
+            'Na*Na*',
+            \strlen($signatureFormat),
+            $signatureFormat,
+            \strlen($signature),
+            $signature
+        );
+
+        $handler->write($signatureRequest);
+        $packet = $this->readMessage($handler, $cancellation);
+
+        // The server was willing to take this key and then turned the signature
+        // down, which is a different problem from not knowing the key at all.
+        if ($packet instanceof UserAuthFailure) {
+            throw new AuthenticationFailureException(\sprintf(
+                'The server rejected the signature made with %s.',
+                $this->privateKeyPath
+            ));
+        }
+
+        if ($packet === null) {
+            throw new AuthenticationFailureException('Connection closed during authentication');
+        }
     }
 
-    private function rsa(BinaryPacketHandler $handler, $key, array $privateKeyInfo, string $sessionId): Promise {
-        return call(function () use ($handler, $key, $privateKeyInfo, $sessionId) {
-            $authServiceRequest = new ServiceRequest();
-            $authServiceRequest->serviceName = 'ssh-userauth';
+    /**
+     * Wraps the key in its certificate, if there is one to find.
+     *
+     * An explicitly given path is an error when missing; the conventional
+     * "<key>-cert.pub" beside the private key is used only when present, so
+     * that keys without a certificate keep working unchanged.
+     */
+    private function withCertificate(SigningKey $key): SigningKey {
+        $path = $this->certificatePath ?? $this->privateKeyPath . '-cert.pub';
 
-            yield $handler->write($authServiceRequest);
-            yield $handler->read();
-
-            $e = $privateKeyInfo['rsa']['e'];
-            $n = $privateKeyInfo['rsa']['n'];
-
-            if (\ord($e[0]) & 0x80) {
-                $e = \chr(0) . $e;
-            }
-            if (\ord($n[0]) & 0x80) {
-                $n = \chr(0) . $n;
+        if (!exists($path)) {
+            if ($this->certificatePath !== null) {
+                throw new AuthenticationFailureException('Certificate does not exist at path: ' . $path);
             }
 
-            $publickey = \pack(
-                'Na*Na*Na*',
-                \strlen('ssh-rsa'),
-                'ssh-rsa',
-                \strlen($e),
-                $e,
-                \strlen($n),
-                $n
-            );
+            return $key;
+        }
 
-            $request = new UserAuthRequestAskPublicKey();
-            $request->username = $this->username;
-            $request->authType = UserAuthRequest::TYPE_PUBLIC_KEY;
-            $request->keyAlgorithm = 'ssh-rsa';
-            $request->keyBlob = $publickey;
+        return new CertifiedKey($key, self::decodeCertificate(read($path), $path));
+    }
 
-            yield $handler->write($request);
-            $package = yield $handler->read();
+    /**
+     * A certificate file looks like a public key line: type, base64 blob and
+     * an optional comment.
+     */
+    private static function decodeCertificate(string $contents, string $path): string {
+        $fields = \preg_split('/\s+/', \trim($contents));
 
-            if (!$package instanceof UserAuthPkOk) {
-                throw new AuthenticationFailureException('Authentication Failure');
-            }
+        if (\count($fields) < 2) {
+            throw new AuthenticationFailureException('Could not read a certificate from ' . $path);
+        }
 
-            $signatureRequest = new UserAuthRequestSignedPublicKey();
-            $signatureRequest->username = $this->username;
-            $signatureRequest->authType = UserAuthRequest::TYPE_PUBLIC_KEY;
-            $signatureRequest->keyAlgorithm = 'ssh-rsa';
-            $signatureRequest->keyBlob = $publickey;
+        $blob = \base64_decode($fields[1], true);
 
-            $signatureRaw = \pack(
-                'Na*a*',
-                \strlen($sessionId),
-                $sessionId,
-                $signatureRequest->encode()
-            );
+        if ($blob === false) {
+            throw new AuthenticationFailureException('The certificate in ' . $path . ' is not valid base64');
+        }
 
-            \openssl_sign($signatureRaw, $signature, $key);
-            $signature = \pack('Na*Na*', \strlen('ssh-rsa'), 'ssh-rsa', \strlen($signature), $signature);
-
-            $signatureRequest->signature = $signature;
-
-            yield $handler->write($signatureRequest);
-            $packet = yield $handler->read();
-
-            if ($packet instanceof UserAuthFailure) {
-                throw new \RuntimeException('Authentication failure');
-            }
-
-            return $packet;
-        });
+        return $blob;
     }
 }

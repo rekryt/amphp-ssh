@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Encryption;
 
@@ -47,14 +47,24 @@ final class Aes extends OpenSSL {
         throw new \RuntimeException('Invalid cipher mode');
     }
 
-    public static function create() {
+    /**
+     * Strongest first, and CTR ahead of CBC.
+     *
+     * Negotiation takes the first name the client offers that the server also
+     * has, so this list is a preference order. CBC used to come first, which
+     * meant picking the weaker mode whenever a server supported both; CBC in
+     * SSH is what the RFC 4344 counter modes were introduced to replace.
+     *
+     * @return self[]
+     */
+    public static function create(): array {
         return [
-            new static(128, Cbc::NAME),
-            new static(192, Cbc::NAME),
-            new static(256, Cbc::NAME),
-            new static(128, Ctr::NAME),
-            new static(192, Ctr::NAME),
             new static(256, Ctr::NAME),
+            new static(192, Ctr::NAME),
+            new static(128, Ctr::NAME),
+            new static(256, Cbc::NAME),
+            new static(192, Cbc::NAME),
+            new static(128, Cbc::NAME),
         ];
     }
 }

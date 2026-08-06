@@ -1,44 +1,50 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Authentication;
 
-use function Amp\call;
-use Amp\Promise;
+use Amp\Cancellation;
 use Amp\Ssh\Message\ServiceRequest;
 use Amp\Ssh\Message\UserAuthFailure;
 use Amp\Ssh\Message\UserAuthRequestPassword;
 use Amp\Ssh\Transport\BinaryPacketHandler;
 
 final class UsernamePassword implements Authentication {
-    private $username;
-    private $password;
+    use HandlesExtInfo;
 
-    public function __construct($username, $password) {
+    private string $username;
+
+    private string $password;
+
+    public function __construct(string $username, string $password) {
         $this->username = $username;
         $this->password = $password;
     }
 
-    public function authenticate(BinaryPacketHandler $binaryPacketHandler, string $sessionId): Promise {
-        return call(function () use ($binaryPacketHandler) {
-            $authServiceRequest = new ServiceRequest();
-            $authServiceRequest->serviceName = 'ssh-userauth';
+    public function authenticate(
+        BinaryPacketHandler $handler,
+        string $sessionId,
+        ?Cancellation $cancellation = null
+    ): void {
+        $authServiceRequest = new ServiceRequest();
+        $authServiceRequest->serviceName = 'ssh-userauth';
 
-            yield $binaryPacketHandler->write($authServiceRequest);
-            yield $binaryPacketHandler->read();
+        $handler->write($authServiceRequest);
+        $this->readMessage($handler, $cancellation);
 
-            $userAuthRequest = new UserAuthRequestPassword();
-            $userAuthRequest->authType = UserAuthRequestPassword::TYPE_PASSWORD;
-            $userAuthRequest->username = $this->username;
-            $userAuthRequest->password = $this->password;
+        $userAuthRequest = new UserAuthRequestPassword();
+        $userAuthRequest->authType = UserAuthRequestPassword::TYPE_PASSWORD;
+        $userAuthRequest->username = $this->username;
+        $userAuthRequest->password = $this->password;
 
-            yield $binaryPacketHandler->write($userAuthRequest);
-            $packet = yield $binaryPacketHandler->read();
+        $handler->write($userAuthRequest);
+        $packet = $this->readMessage($handler, $cancellation);
 
-            if ($packet instanceof UserAuthFailure) {
-                throw new AuthenticationFailureException('Authentication failure');
-            }
+        if ($packet instanceof UserAuthFailure) {
+            throw new AuthenticationFailureException('Authentication failure');
+        }
 
-            return $packet;
-        });
+        if ($packet === null) {
+            throw new AuthenticationFailureException('Connection closed during authentication');
+        }
     }
 }

@@ -1,6 +1,23 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Transport;
+
+/**
+ * Guard a read against a payload shorter than the field requires.
+ *
+ * Every reader below funnels through this. A remote peer controls both the
+ * packet length and the length prefixes inside it, so "there is enough left"
+ * can never be assumed.
+ *
+ * @throws TruncatedPacketException
+ */
+function assert_available(string $payload, int $required, string $field) {
+    $available = \strlen($payload);
+
+    if ($available < $required) {
+        throw TruncatedPacketException::forField($field, $required, $available);
+    }
+}
 
 /**
  * A byte represents an arbitrary 8-bit value (octet).  Fixed length
@@ -8,15 +25,26 @@ namespace Amp\Ssh\Transport;
  * byte[n], where n is the number of bytes in the array.
  *
  * @see https://tools.ietf.org/html/rfc4251#section-5
+ *
+ * @throws TruncatedPacketException
  */
 function read_byte(string &$payload): int {
+    assert_available($payload, 1, 'byte');
+
     $byte = \unpack('C', $payload)[1];
     $payload = \substr($payload, 1);
 
     return $byte;
 }
 
-function read_bytes(&$payload, $length) {
+/**
+ * Read a fixed number of raw bytes off the front of the payload.
+ *
+ * @throws TruncatedPacketException
+ */
+function read_bytes(string &$payload, int $length): string {
+    assert_available($payload, $length, \sprintf('byte[%d]', $length));
+
     $bytes = \substr($payload, 0, $length);
     $payload = \substr($payload, $length);
 
@@ -30,6 +58,8 @@ function read_bytes(&$payload, $length) {
  * store values other than 0 and 1.
  *
  * @see https://tools.ietf.org/html/rfc4251#section-5
+ *
+ * @throws TruncatedPacketException
  */
 function read_boolean(string &$payload): bool {
     return (bool) read_byte($payload);
@@ -42,8 +72,12 @@ function read_boolean(string &$payload): bool {
  * aa.
  *
  * @see https://tools.ietf.org/html/rfc4251#section-5
+ *
+ * @throws TruncatedPacketException
  */
 function read_uint32(string &$payload): int {
+    assert_available($payload, 4, 'uint32');
+
     $uint32 = \unpack('N', $payload)[1];
     $payload = \substr($payload, 4);
 
@@ -55,8 +89,12 @@ function read_uint32(string &$payload): int {
  * the order of decreasing significance (network byte order).
  *
  * @see https://tools.ietf.org/html/rfc4251#section-5
+ *
+ * @throws TruncatedPacketException
  */
 function read_uint64(string &$payload): int {
+    assert_available($payload, 8, 'uint64');
+
     $uint64 = \unpack('J', $payload)[1];
     $payload = \substr($payload, 8);
 
@@ -79,9 +117,14 @@ function read_uint64(string &$payload): int {
  * UTF-8 mapping does not alter the encoding of US-ASCII characters.
  *
  * @see https://tools.ietf.org/html/rfc4251#section-5
+ *
+ * @throws TruncatedPacketException
  */
 function read_string(string &$payload): string {
     $length = read_uint32($payload);
+
+    assert_available($payload, $length, 'string');
+
     $string = \substr($payload, 0, $length);
     $payload = \substr($payload, $length);
 
@@ -102,6 +145,8 @@ function read_string(string &$payload): string {
  * Z_n SHOULD be represented in the range 0 <= x < n.
  *
  * @see https://tools.ietf.org/html/rfc4251#section-5
+ *
+ * @throws TruncatedPacketException
  */
 function read_mpint(string &$payload): string {
     return read_string($payload);
@@ -123,6 +168,8 @@ function read_mpint(string &$payload): string {
  * for the individual names, nor for the list as a whole.
  *
  * @see https://tools.ietf.org/html/rfc4251#section-5
+ *
+ * @throws TruncatedPacketException
  */
 function read_namelist(string &$payload): array {
     $nameListString = read_string($payload);

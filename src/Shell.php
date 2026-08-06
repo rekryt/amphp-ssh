@@ -1,162 +1,182 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh;
 
-use function Amp\asyncCall;
-use Amp\ByteStream\InputStream;
-use Amp\ByteStream\OutputStream;
-use function Amp\call;
-use Amp\Deferred;
-use Amp\Failure;
-use Amp\Promise;
+use function Amp\async;
+use Amp\ByteStream\ReadableStream;
+use Amp\ByteStream\WritableStream;
+use Amp\Cancellation;
+use Amp\DeferredFuture;
+use Amp\Future;
 use Amp\Ssh\Channel\ChannelInputStream;
 use Amp\Ssh\Channel\ChannelOutputStream;
 use Amp\Ssh\Message\ChannelRequestExitStatus;
-use Amp\Success;
 
 class Shell {
-    /** @var Channel\Session */
-    private $session;
+    /** @see Process::SIGKILL */
+    private const SIGKILL = 9;
 
-    /** @var ChannelInputStream */
-    private $stderr;
+    private Channel\Session $session;
 
-    /** @var ChannelInputStream */
-    private $stdout;
+    private ChannelInputStream $stderr;
 
-    /** @var ChannelOutputStream */
-    private $stdin;
+    private ChannelInputStream $stdout;
 
-    /** @var int */
-    private $exitCode;
+    private ChannelOutputStream $stdin;
 
-    /** @var Deferred */
-    private $resolved;
+    private int|false|null $exitCode = null;
 
-    /** @var array */
-    private $env;
+    private ?\Throwable $failure = null;
+
+    private bool $finished = false;
+
+    private ?DeferredFuture $deferred = null;
+
+    private array $env;
+
+    private ?Future $requestHandler = null;
 
     public function __construct(SshResource $sshResource, array $env = []) {
         $this->session = $sshResource->createSession();
-        $this->handleRequests();
-        $this->stdout = new ChannelInputStream($this->session->getDataEmitter()->iterate());
-        $this->stderr = new ChannelInputStream($this->session->getDataExtendedEmitter()->iterate());
+        $this->stdout = new ChannelInputStream($this->session->getDataIterator());
+        $this->stderr = new ChannelInputStream($this->session->getDataExtendedIterator());
         $this->stdin = new ChannelOutputStream($this->session);
         $this->env = $env;
+
+        $this->handleRequests();
     }
 
-    public function __destruct() {
-        if ($this->isRunning()) {
-            $this->kill();
+    /**
+     * @see Process::join()
+     */
+    public function join(?Cancellation $cancellation = null): int|false {
+        if ($this->failure !== null) {
+            throw $this->failure;
         }
-    }
 
-    public function join(): Promise {
         if ($this->exitCode !== null) {
-            return new Success($this->exitCode);
+            return $this->exitCode;
         }
 
-        if (!$this->isRunning()) {
-            return new Failure(new StatusError('Shell is not running'));
+        if ($this->deferred === null) {
+            throw new StatusError('Shell is not running');
         }
 
-        return $this->resolved->promise();
+        return $this->deferred->getFuture()->await($cancellation);
     }
 
-    public function start(int $columns = 80, int $rows = 24, int $width = 800, int $height = 600): Promise {
-        if ($this->resolved !== null || $this->exitCode !== null) {
-            return new Failure(new StatusError('Shell has already been started.'));
+    public function start(int $columns = 80, int $rows = 24, int $width = 800, int $height = 600): void {
+        if ($this->deferred !== null) {
+            throw new StatusError('Shell has already been started.');
         }
 
-        $this->resolved = new Deferred();
-        $this->exitCode = null;
+        if ($this->finished) {
+            throw new StatusError('Shell channel is already closed.');
+        }
 
-        return call(function () use ($columns, $rows, $width, $height) {
-            try {
-                yield $this->session->open();
+        $this->deferred = new DeferredFuture();
 
-                foreach ($this->env as $key => $value) {
-                    yield $this->session->env($key, $value, true);
-                }
+        try {
+            $this->session->open();
 
-                yield $this->session->pty($columns, $rows, $width, $height);
-                yield $this->session->shell();
-            } catch (\Exception $exception) {
-                $this->resolved = null;
-                throw $exception;
+            foreach ($this->env as $key => $value) {
+                $this->session->env((string) $key, (string) $value, true);
             }
-        });
-    }
 
-    public function changeWindowSize(int $columns = 80, int $rows = 24, int $width = 800, int $height = 600) {
-        if (!$this->isRunning()) {
-            return new Failure(new StatusError('Shell is not running.'));
+            $this->session->pty($columns, $rows, $width, $height);
+            $this->session->shell();
+        } catch (\Throwable $exception) {
+            $this->deferred = null;
+
+            throw $exception;
         }
-
-        return $this->session->changeWindowSize($columns, $rows, $width, $height);
     }
 
-    public function kill() {
+    public function changeWindowSize(int $columns = 80, int $rows = 24, int $width = 800, int $height = 600): void {
         if (!$this->isRunning()) {
             throw new StatusError('Shell is not running.');
         }
 
-        Promise\rethrow($this->signal(SIGKILL));
+        $this->session->changeWindowSize($columns, $rows, $width, $height);
     }
 
-    public function signal(int $signo): Promise {
+    public function kill(): void {
+        $this->signal(self::SIGKILL);
+    }
+
+    public function signal(int $signo): void {
         if (!$this->isRunning()) {
-            return new Failure(new StatusError('Shell is not running.'));
+            throw new StatusError('Shell is not running.');
         }
 
-        return $this->session->signal($signo);
+        $this->session->signal($signo);
     }
 
-    public function isRunning() {
-        return $this->resolved !== null;
+    public function isRunning(): bool {
+        return $this->deferred !== null && !$this->finished;
     }
 
-    public function getStdin(): OutputStream {
+    public function getStdin(): WritableStream {
         return $this->stdin;
     }
 
-    public function getStdout(): InputStream {
+    public function getStdout(): ReadableStream {
         return $this->stdout;
     }
 
-    public function getStderr(): InputStream {
+    public function getStderr(): ReadableStream {
         return $this->stderr;
     }
 
-    private function handleRequests() {
-        asyncCall(function () {
-            $requestIterator = $this->session->getRequestEmitter()->iterate();
+    /**
+     * @see Process::handleRequests()
+     *
+     * The v2 version broke out of this loop after the exit status. Under v3
+     * that releases the iterator, which disposes the queue and makes the
+     * channel's next push fail, so the loop now always runs to the end.
+     */
+    private function handleRequests(): void {
+        $this->requestHandler = async(function (): void {
+            $iterator = $this->session->getRequestIterator();
+
             try {
-                while (yield $requestIterator->advance()) {
-                    $message = $requestIterator->getCurrent();
+                while ($iterator->continue()) {
+                    $message = $iterator->getValue();
 
                     if ($message instanceof ChannelRequestExitStatus) {
-                        $resolved = $this->resolved;
-                        $this->resolved = null;
-                        $this->exitCode = $message->code;
-                        $resolved->resolve($message->code);
-
-                        break;
+                        $this->complete($message->code);
                     }
                 }
-                // some servers does not send exit status
-                if ($this->resolved) {
-                    $this->resolved->resolve(false);
-                    $this->exitCode = false;
-                    $this->resolved = null;
-                }
-            } catch (\Exception $exception) {
-                if ($this->resolved) {
-                    $resolved = $this->resolved;
-                    $this->resolved = null;
-                    $resolved->fail($exception);
-                }
+
+                // Some servers never send an exit status.
+                $this->complete(false);
+            } catch (\Throwable $exception) {
+                $this->fail($exception);
             }
         });
+    }
+
+    private function complete(int|false $exitCode): void {
+        if ($this->finished) {
+            return;
+        }
+
+        $this->finished = true;
+        $this->exitCode = $exitCode;
+        $this->deferred?->complete($exitCode);
+    }
+
+    private function fail(\Throwable $exception): void {
+        if ($this->finished) {
+            return;
+        }
+
+        $this->finished = true;
+        $this->failure = $exception;
+
+        if ($this->deferred !== null) {
+            $this->deferred->error($exception);
+            $this->deferred->getFuture()->ignore();
+        }
     }
 }

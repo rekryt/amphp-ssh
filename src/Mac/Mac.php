@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Mac;
 
@@ -12,5 +12,5 @@ interface Mac {
 
     public function getName(): string;
 
-    public function setKey(string $key);
+    public function setKey(string $key): void;
 }

@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Encryption;
 
@@ -26,9 +26,9 @@ final class None implements Encryption, Decryption {
         return 'none';
     }
 
-    public function resetDecrypt(string $key, string $initIv) {
+    public function resetDecrypt(string $key, string $initIv): void {
     }
 
-    public function resetEncrypt(string $key, string $initIv) {
+    public function resetEncrypt(string $key, string $initIv): void {
     }
 }

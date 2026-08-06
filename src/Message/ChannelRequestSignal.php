@@ -1,35 +1,30 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Message;
 
+use Amp\Ssh\Internal\Signals;
 use function Amp\Ssh\Transport\read_string;
 
 /**
+ * Asking the server to signal the command running on a channel.
+ *
  * @internal
  */
 final class ChannelRequestSignal extends ChannelRequest {
     public $signal;
 
-    private static $signalMapping = [
-        SIGABRT => 'ABRT',
-        SIGALRM => 'ALRM',
-        SIGFPE => 'FPE',
-        SIGHUP => 'HUP',
-        SIGILL => 'ILL',
-        SIGINT => 'INT',
-        SIGKILL => 'KILL',
-        SIGPIPE => 'PIPE',
-        SIGQUIT => 'QUIT',
-        SIGSEGV => 'SEGV',
-        SIGTERM => 'TERM',
-        SIGUSR1 => 'USR1',
-        SIGUSR2 => 'USR2',
-    ];
-
     public $wantReply = false;
 
     public function encode(): string {
-        $signal = \is_int($this->signal) ? self::$signalMapping[$this->signal] : $this->signal;
+        $signal = \is_int($this->signal) ? Signals::name($this->signal) : $this->signal;
+
+        if ($signal === null) {
+            throw new \InvalidArgumentException(\sprintf(
+                'Signal %d has no name in RFC 4254; pass one of %s instead.',
+                $this->signal,
+                \implode(', ', Signals::names())
+            ));
+        }
 
         return parent::encode() . \pack(
             'Na*',
@@ -43,8 +38,6 @@ final class ChannelRequestSignal extends ChannelRequest {
     }
 
     protected function decodeExtraData($extraPayload) {
-        $signal = read_string($extraPayload);
-
-        $this->signal = \current(\array_keys(self::$signalMapping, $signal));
+        $this->signal = Signals::number(read_string($extraPayload));
     }
 }

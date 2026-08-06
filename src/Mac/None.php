@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Mac;
 
@@ -18,6 +18,6 @@ final class None implements Mac {
         return 'none';
     }
 
-    public function setKey(string $key) {
+    public function setKey(string $key): void {
     }
 }

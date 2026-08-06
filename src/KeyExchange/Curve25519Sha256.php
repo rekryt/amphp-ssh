@@ -1,9 +1,8 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\KeyExchange;
 
-use function Amp\call;
-use Amp\Promise;
+use Amp\Cancellation;
 use Amp\Ssh\Message\KeyExchangeCurveInit;
 use Amp\Ssh\Message\KeyExchangeCurveReply;
 use Amp\Ssh\Message\Message;
@@ -17,31 +16,29 @@ final class Curve25519Sha256 implements KeyExchange {
         return 'curve25519-sha256@libssh.org';
     }
 
-    public function exchange(BinaryPacketHandler $handler): Promise {
-        return call(function () use ($handler) {
-            $secret = \random_bytes(32);
-            $message = new KeyExchangeCurveInit();
-            $message->exchange = \sodium_crypto_box_publickey_from_secretkey($secret);
+    public function exchange(BinaryPacketHandler $handler, ?Cancellation $cancellation = null): array {
+        $secret = \random_bytes(32);
+        $message = new KeyExchangeCurveInit();
+        $message->exchange = \sodium_crypto_box_publickey_from_secretkey($secret);
 
-            yield $handler->write($message);
-            $packet = yield $handler->read();
+        $handler->write($message);
+        $packet = $handler->read($cancellation);
 
-            if (!$packet instanceof KeyExchangeCurveReply) {
-                throw new \RuntimeException('Invalid reply');
-            }
+        if (!$packet instanceof KeyExchangeCurveReply) {
+            throw new \RuntimeException('Invalid reply');
+        }
 
-            if (\strlen($packet->fBytes) !== 32) {
-                throw new \RuntimeException('Invalid reply');
-            }
+        if (\strlen($packet->fBytes) !== 32) {
+            throw new \RuntimeException('Invalid reply');
+        }
 
-            $key = \sodium_crypto_scalarmult($secret, $packet->fBytes);
-            \sodium_memzero($secret);
+        $key = \sodium_crypto_scalarmult($secret, $packet->fBytes);
+        \sodium_memzero($secret);
 
-            return [twos_compliment($key), $message, $packet];
-        });
+        return [twos_compliment($key), $message, $packet];
     }
 
-    public function getEBytes(Message $message) {
+    public function getEBytes(Message $message): string {
         if (!$message instanceof KeyExchangeCurveInit) {
             throw new \RuntimeException();
         }
@@ -49,7 +46,7 @@ final class Curve25519Sha256 implements KeyExchange {
         return $message->exchange;
     }
 
-    public function getFBytes(Message $message) {
+    public function getFBytes(Message $message): string {
         if (!$message instanceof KeyExchangeCurveReply) {
             throw new \RuntimeException();
         }
@@ -57,7 +54,7 @@ final class Curve25519Sha256 implements KeyExchange {
         return $message->fBytes;
     }
 
-    public function getHostKey(Message $message) {
+    public function getHostKey(Message $message): string {
         if (!$message instanceof KeyExchangeCurveReply) {
             throw new \RuntimeException();
         }

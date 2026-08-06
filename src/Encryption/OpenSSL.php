@@ -1,4 +1,4 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Encryption;
 
@@ -20,12 +20,12 @@ abstract class OpenSSL implements Decryption, Encryption {
 
     abstract protected function createCipherMode(string $iv): CipherMode;
 
-    public function resetEncrypt(string $key, string $initIv) {
+    public function resetEncrypt(string $key, string $initIv): void {
         $this->key = $key;
         $this->encryptCipherMode = $this->createCipherMode($initIv);
     }
 
-    public function resetDecrypt(string $key, string $initIv) {
+    public function resetDecrypt(string $key, string $initIv): void {
         $this->key = $key;
         $this->decryptCipherMode = $this->createCipherMode($initIv);
     }
