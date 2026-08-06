@@ -166,8 +166,16 @@ The MIT License (MIT). Please see [`LICENSE`](./LICENSE) for more information.
 
 ## Credits
 
-A lot of work on this lib would not have been possible with previous awesome folks implementing
-this specification in PHP:
+Besides the authors named in `composer.json`, this library carries work from:
+
+ * [Max Furtuna](https://github.com/Ekstazi) — the diffie-hellman-group14, group16 and group18
+   key exchanges, window size changes, the dispatcher's error handling, and much of the test
+   suite the current one grew out of
+ * [Niklas Keller](https://github.com/kelunik) — an infinite loop out of `connect()`, and an
+   identification parser strict about the prefix it accepts
+
+And none of it would have been possible without the people who implemented this specification in
+PHP first:
 
  * [PHPSeclib](https://github.com/phpseclib/phpseclib)
  * [PHP Encrypted Streams](https://github.com/jeskew/php-encrypted-streams)
