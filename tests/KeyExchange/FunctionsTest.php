@@ -43,28 +43,42 @@ class FunctionsTest extends TestCase {
     }
 
     /**
-     * Cross-checks the encoding against the arbitrary precision maths PHP has
-     * built in, which is where the definition of "the shortest signed big
-     * endian form" can be taken from independently.
+     * Asserts the two RFC 4251 rules over random input, with no oracle.
+     *
+     * An mpint is defined by exactly those two properties, so they can be
+     * checked directly - and that is worth more here than comparing against a
+     * big-integer library would be. Naming one would tie this file's coding
+     * style to the machine it is linted on: php-cs-fixer decides whether a
+     * function is "internal" by asking the running PHP, so gmp_import needs a
+     * leading backslash where ext-gmp is loaded and must not have one where it
+     * is missing.
      */
-    public function testAgreesWithGmpOrBcmathOverManyRandomValues(): void {
-        if (!\function_exists('gmp_import')) {
-            self::markTestSkipped('ext-gmp is not loaded');
-        }
-
+    public function testRandomValuesKeepTheirValueAndCarryNoSpareZero(): void {
         for ($i = 0; $i < 2000; ++$i) {
             $value = \random_bytes(32);
-            $expected = gmp_export(gmp_import($value), 1, GMP_MSW_FIRST | GMP_BIG_ENDIAN);
+            $encoded = twos_compliment($value);
+            $where = ' for ' . \bin2hex($value);
 
-            if ($expected !== '' && (\ord($expected[0]) & 0x80) !== 0) {
-                $expected = "\x00" . $expected;
+            // The number itself is unchanged: the same bytes once leading
+            // zeros are set aside on both sides.
+            self::assertSame(
+                \bin2hex(\ltrim($value, "\x00")),
+                \bin2hex(\ltrim($encoded, "\x00")),
+                'the value changed' . $where
+            );
+
+            if ($encoded === '') {
+                continue;
             }
 
-            self::assertSame(
-                \bin2hex($expected),
-                \bin2hex(twos_compliment($value)),
-                'mismatch for ' . \bin2hex($value)
-            );
+            // Never reads as negative.
+            self::assertSame(0, \ord($encoded[0]) & 0x80, 'high bit left exposed' . $where);
+
+            // And the zero in front, when there is one, is there because the
+            // byte after it needs it.
+            if ($encoded[0] === "\x00") {
+                self::assertNotSame(0, \ord($encoded[1]) & 0x80, 'unnecessary leading zero' . $where);
+            }
         }
     }
 }

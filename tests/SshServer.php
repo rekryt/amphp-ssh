@@ -2,6 +2,7 @@
 
 namespace Amp\Ssh\Tests;
 
+use Amp\Ssh\Authentication\Authentication;
 use Amp\Ssh\Authentication\UsernamePassword;
 use function Amp\Ssh\connect;
 use Amp\Ssh\HostKey\AcceptAnyHostKey;
@@ -102,15 +103,28 @@ final class SshServer {
         );
     }
 
+    public static function connect(): SshResource {
+        return self::connectWith(new UsernamePassword(self::user(), self::password()));
+    }
+
     /**
+     * The one place an integration test opens a connection.
+     *
      * The test server is disposable and its host key changes with every build,
      * so there is nothing to pin it against. Opting out explicitly is the point
      * of AcceptAnyHostKey; production code should never reach for it.
+     *
+     * Going through here rather than calling connect() per test is what makes
+     * that opt-out reliable. A test that built its own call got the default
+     * verifier instead, which reads ~/.ssh/known_hosts - so it passed on a
+     * developer machine that happened to have an entry and failed on a clean
+     * runner with no such file, for a reason that had nothing to do with what
+     * the test was about.
      */
-    public static function connect(): SshResource {
+    public static function connectWith(Authentication $authentication): SshResource {
         return connect(
             self::uri(),
-            new UsernamePassword(self::user(), self::password()),
+            $authentication,
             LoggerTest::get(),
             hostKeyVerifier: new AcceptAnyHostKey()
         );

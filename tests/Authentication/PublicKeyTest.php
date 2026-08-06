@@ -5,15 +5,12 @@ namespace Amp\Ssh\Tests;
 use Amp\Ssh\Authentication\AuthenticationFailureException;
 use Amp\Ssh\Authentication\PublicKey;
 use Amp\Ssh\Authentication\PublicKeyNotAcceptedException;
-use function Amp\Ssh\connect;
 use Amp\Ssh\SshResource;
 
 class PublicKeyTest extends IntegrationTestCase {
     private function connectWithKey(string $keyFile, string $passphrase = ''): SshResource {
-        return connect(
-            SshServer::uri(),
-            new PublicKey(SshServer::user(), __DIR__ . '/../' . $keyFile, $passphrase),
-            LoggerTest::get()
+        return SshServer::connectWith(
+            new PublicKey(SshServer::user(), __DIR__ . '/../' . $keyFile, $passphrase)
         );
     }
 
