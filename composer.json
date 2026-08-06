@@ -5,8 +5,6 @@
     "keywords": [
         "ssh",
         "ssh2",
-        "sftp",
-        "scp",
         "client",
         "async",
         "amp",
@@ -17,25 +15,34 @@
         {
             "name": "Joel Wurtz",
             "email": "jwurtz@jolicode.com"
+        },
+        {
+            "name": "Sergey Krupkin",
+            "email": "rekrytkw@gmail.com"
         }
     ],
     "require": {
+        "php": ">=8.1",
+        "ext-openssl": "*",
         "ext-sodium": "*",
-        "amphp/socket": "^1.0",
-        "amphp/file": "^0.3",
-        "amphp/amp": "^2.0.3",
-        "psr/log": "^1.0"
+        "amphp/amp": "^3.1",
+        "amphp/byte-stream": "^2.1",
+        "amphp/file": "^4.0",
+        "amphp/pipeline": "^1.2",
+        "amphp/socket": "^2.4",
+        "paragonie/sodium_compat": "^1.21 || ^2.0",
+        "psr/log": "^3",
+        "revolt/event-loop": "^1"
     },
     "require-dev": {
-        "amphp/phpunit-util": "^1",
-        "friendsofphp/php-cs-fixer": "^2.9",
-        "monolog/monolog": "^1.23",
-        "phpunit/phpunit": "^6.5"
+        "amphp/phpunit-util": "^3",
+        "friendsofphp/php-cs-fixer": "^3",
+        "monolog/monolog": "^3",
+        "phpunit/phpunit": "^9"
     },
     "autoload": {
         "psr-4": {
-            "Amp\\Ssh\\": "src",
-            "Amp\\Ssh\\Tests\\": "tests"
+            "Amp\\Ssh\\": "src"
         },
         "files": [
             "src/functions.php",
@@ -43,12 +50,17 @@
             "src/KeyExchange/functions.php"
         ]
     },
+    "autoload-dev": {
+        "psr-4": {
+            "Amp\\Ssh\\Tests\\": "tests"
+        }
+    },
     "config": {
         "sort-packages": true
     },
     "scripts": {
-        "test": "vendor/bin/phpunit",
-        "test-coverage": "phpdbg -qrr vendor/bin/phpunit --coverage-text --coverage-clover build/logs/clover.xml",
-        "lint": "vendor/bin/php-cs-fixer --diff --dry-run -v fix"
+        "test": "phpunit",
+        "test-coverage": "phpunit --coverage-text --coverage-clover build/logs/clover.xml",
+        "lint": "php-cs-fixer fix --diff --dry-run -v"
     }
 }
