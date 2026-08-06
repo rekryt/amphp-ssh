@@ -3,13 +3,12 @@
 namespace Amp\Ssh\Authentication;
 
 use Amp\Cancellation;
-use Amp\Ssh\Message\ServiceRequest;
 use Amp\Ssh\Message\UserAuthFailure;
 use Amp\Ssh\Message\UserAuthRequestPassword;
 use Amp\Ssh\Transport\BinaryPacketHandler;
 
 final class UsernamePassword implements Authentication {
-    use HandlesExtInfo;
+    use ReadsAuthenticationMessages;
 
     private string $username;
 
@@ -25,11 +24,7 @@ final class UsernamePassword implements Authentication {
         string $sessionId,
         ?Cancellation $cancellation = null
     ): void {
-        $authServiceRequest = new ServiceRequest();
-        $authServiceRequest->serviceName = 'ssh-userauth';
-
-        $handler->write($authServiceRequest);
-        $this->readMessage($handler, $cancellation);
+        $this->requestUserAuthService($handler, $cancellation);
 
         $userAuthRequest = new UserAuthRequestPassword();
         $userAuthRequest->authType = UserAuthRequestPassword::TYPE_PASSWORD;

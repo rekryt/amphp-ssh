@@ -5,7 +5,6 @@ namespace Amp\Ssh\Authentication;
 use Amp\Cancellation;
 use function Amp\File\exists;
 use function Amp\File\read;
-use Amp\Ssh\Message\ServiceRequest;
 use Amp\Ssh\Message\UserAuthFailure;
 use Amp\Ssh\Message\UserAuthPkOk;
 use Amp\Ssh\Message\UserAuthRequest;
@@ -14,7 +13,7 @@ use Amp\Ssh\Message\UserAuthRequestSignedPublicKey;
 use Amp\Ssh\Transport\BinaryPacketHandler;
 
 final class PublicKey implements Authentication {
-    use HandlesExtInfo;
+    use ReadsAuthenticationMessages;
 
     private string $privateKeyPath;
 
@@ -54,14 +53,10 @@ final class PublicKey implements Authentication {
         $key = PrivateKeyLoader::load(read($this->privateKeyPath), $this->passphrase);
         $key = $this->withCertificate($key);
 
-        $authServiceRequest = new ServiceRequest();
-        $authServiceRequest->serviceName = 'ssh-userauth';
-
-        $handler->write($authServiceRequest);
-
-        // The server's EXT_INFO arrives around here; readMessage() absorbs it,
-        // which is what lets the key pick an algorithm the server will take.
-        $this->readMessage($handler, $cancellation);
+        // The server's EXT_INFO arrives around here, and readMessage() absorbs
+        // it on the way, which is what lets the key pick an algorithm the
+        // server will take.
+        $this->requestUserAuthService($handler, $cancellation);
 
         $algorithm = $key->getSignatureAlgorithm($this->serverSignatureAlgorithms);
         $publicKey = $key->getPublicKeyBlob();
