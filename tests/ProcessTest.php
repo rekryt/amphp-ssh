@@ -1,137 +1,120 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Tests;
 
-use function Amp\call;
-use Amp\Loop;
-use Amp\Ssh\Authentication\UsernamePassword;
+use function Amp\async;
+use Amp\ByteStream;
+use Amp\CancelledException;
+use Amp\Future;
 use Amp\Ssh\Channel\ChannelException;
 use Amp\Ssh\Channel\SessionEnvException;
-use function Amp\Ssh\connect;
 use Amp\Ssh\Process;
-use Amp\Ssh\SshResource;
 use Amp\Ssh\StatusError;
-use PHPUnit\Framework\TestCase;
+use Amp\TimeoutCancellation;
+use Revolt\EventLoop;
 
-class ProcessTest extends TestCase {
-    protected function getSsh() {
-        return call(function () {
-            $authentication = new UsernamePassword('root', 'root');
-
-            return yield connect('127.0.0.1:2222', $authentication, LoggerTest::get());
-        });
-    }
-
+class ProcessTest extends IntegrationTestCase {
     public function testProcess() {
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $process = new Process($ssh, 'echo foo');
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'echo foo');
 
-            yield $process->start();
+        $process->start();
 
-            self::assertTrue($process->isRunning());
+        self::assertTrue($process->isRunning());
 
-            $exitCode = yield $process->join();
-            $output = '';
+        $exitCode = $process->join();
+        $output = ByteStream\buffer($process->getStdout());
 
-            while ($read = yield $process->getStdout()->read()) {
-                $output .= $read;
-            }
+        self::assertFalse($process->isRunning());
+        self::assertSame("foo\n", $output);
+        self::assertSame(0, $exitCode);
 
-            self::assertFalse($process->isRunning());
-            self::assertEquals("foo\n", $output);
-            self::assertEquals(0, $exitCode);
-
-            yield $ssh->close();
-        });
+        $ssh->close();
     }
 
     public function testProcessNotStartedOnJoin() {
-        self::expectException(StatusError::class);
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'echo foo');
 
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $process = new Process($ssh, 'echo foo');
+        $this->expectException(StatusError::class);
 
-            yield $process->join();
-        });
+        try {
+            $process->join();
+        } finally {
+            $ssh->close();
+        }
     }
 
     public function testProcessNotStartedOnSignal() {
-        self::expectException(StatusError::class);
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'echo foo');
 
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $process = new Process($ssh, 'echo foo');
+        $this->expectException(StatusError::class);
 
-            yield $process->signal(SIGKILL);
-        });
+        try {
+            $process->signal(9);
+        } finally {
+            $ssh->close();
+        }
     }
 
     public function testProcessAlreadyStarted() {
-        self::expectException(StatusError::class);
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'echo foo');
 
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $process = new Process($ssh, 'echo foo');
+        $process->start();
 
-            yield $process->start();
-            yield $process->start();
-        });
+        $this->expectException(StatusError::class);
+
+        try {
+            $process->start();
+        } finally {
+            $ssh->close();
+        }
     }
 
     public function testProcessEnv() {
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $process = new Process($ssh, 'echo $FOO', null, ['FOO' => 'bar']);
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'echo $FOO', null, ['FOO' => 'bar']);
 
-            yield $process->start();
+        try {
+            $process->start();
+        } catch (SessionEnvException $exception) {
+            $ssh->close();
 
-            self::assertTrue($process->isRunning());
+            // AcceptEnv decides this, and only the test container is set up to
+            // allow FOO; a stock sshd allows little beyond LANG and LC_*. The
+            // refusal itself is what testProcessBadEnv asserts on, so a server
+            // that says no leaves nothing here to prove.
+            self::markTestSkipped('This server does not accept the FOO environment variable (AcceptEnv).');
+        }
 
-            $exitCode = yield $process->join();
-            $output = '';
+        self::assertTrue($process->isRunning());
 
-            while ($read = yield $process->getStdout()->read()) {
-                $output .= $read;
-            }
+        $exitCode = $process->join();
+        $output = ByteStream\buffer($process->getStdout());
 
-            self::assertFalse($process->isRunning());
-            self::assertEquals("bar\n", $output);
-            self::assertEquals(0, $exitCode);
+        self::assertFalse($process->isRunning());
+        self::assertSame("bar\n", $output);
+        self::assertSame(0, $exitCode);
 
-            $exitCode = yield $process->join();
+        // join() is repeatable and keeps returning the same result.
+        self::assertSame(0, $process->join());
 
-            self::assertEquals(0, $exitCode);
-
-            yield $ssh->close();
-        });
+        $ssh->close();
     }
 
     public function testProcessBadEnv() {
-        self::expectException(SessionEnvException::class);
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'echo $FOO2', null, ['FOO2' => 'bar']);
 
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $process = new Process($ssh, 'echo $FOO2', null, ['FOO2' => 'bar']);
+        $this->expectException(SessionEnvException::class);
 
-            yield $process->start();
-
-            self::assertTrue($process->isRunning());
-
-            $exitCode = yield $process->join();
-            $output = '';
-
-            while ($read = yield $process->getStdout()->read()) {
-                $output .= $read;
-            }
-
-            self::assertFalse($process->isRunning());
-            self::assertEquals("bar\n", $output);
-            self::assertEquals(0, $exitCode);
-
-            yield $ssh->close();
-        });
+        try {
+            $process->start();
+        } finally {
+            $ssh->close();
+        }
     }
 
     public function testSignal() {
@@ -139,94 +122,216 @@ class ProcessTest extends TestCase {
     }
 
     public function testStdin() {
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $process = new Process($ssh, 'read foo; echo $foo');
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'read foo; echo $foo');
 
-            yield $process->start();
+        $process->start();
 
-            self::assertTrue($process->isRunning());
+        self::assertTrue($process->isRunning());
 
-            yield $process->getStdin()->write("bar\n");
+        $process->getStdin()->write("bar\n");
 
-            $exitCode = yield $process->join();
-            $output = '';
+        $exitCode = $process->join();
+        $output = ByteStream\buffer($process->getStdout());
 
-            while ($read = yield $process->getStdout()->read()) {
-                $output .= $read;
-            }
+        self::assertFalse($process->isRunning());
+        self::assertSame("bar\n", $output);
+        self::assertSame(0, $exitCode);
 
-            self::assertFalse($process->isRunning());
-            self::assertEquals("bar\n", $output);
-            self::assertEquals(0, $exitCode);
-
-            yield $ssh->close();
-        });
+        $ssh->close();
     }
 
     public function testStderr() {
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $process = new Process($ssh, '>&2 echo foo');
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, '>&2 echo foo');
 
-            yield $process->start();
+        $process->start();
 
-            self::assertTrue($process->isRunning());
+        self::assertTrue($process->isRunning());
 
-            $exitCode = yield $process->join();
-            $output = '';
+        $exitCode = $process->join();
+        $output = ByteStream\buffer($process->getStderr());
 
-            while ($read = yield $process->getStderr()->read()) {
-                $output .= $read;
-            }
+        self::assertFalse($process->isRunning());
+        self::assertSame("foo\n", $output);
+        self::assertSame(0, $exitCode);
 
-            self::assertFalse($process->isRunning());
-            self::assertEquals("foo\n", $output);
-            self::assertEquals(0, $exitCode);
-
-            yield $ssh->close();
-        });
+        $ssh->close();
     }
 
     /**
-     * If connection closed by server and process started then fail with channel error.
+     * A connection dropped underneath a running process is an error, not an
+     * orderly end.
      */
     public function testProcessFailOnDisconnect() {
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'sleep 10; echo test;');
+
+        $process->start();
+
+        self::assertTrue($process->isRunning());
+
+        EventLoop::queue(static fn () => NetworkHelper::disconnect($ssh));
+
         $this->expectException(ChannelException::class);
-        Loop::run(function () {
-            /** @var SshResource $ssh */
-            $ssh = yield $this->getSsh();
 
-            $process = new Process($ssh, 'sleep 10; echo test;');
-
-            yield $process->start();
-            self::assertTrue($process->isRunning());
-            Loop::defer(function () use ($ssh) {
-                NetworkHelper::disconnect($ssh);
-            });
-            yield $process->join();
-        });
+        $process->join();
     }
 
     /**
-     * If channel closed then join must resolve with false exitCode
-     * Some implementations doesn't send exit code.
-     * In that cases false must be used.
+     * A channel closed without an exit status resolves to false: some servers
+     * simply never send one.
      */
     public function testProcessFinishWithFalseOnChannelClose() {
-        Loop::run(function () {
-            /** @var SshResource $ssh */
-            $ssh = yield $this->getSsh();
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'sleep 10; echo test;');
 
-            $process = new Process($ssh, 'sleep 10; echo test;');
+        $process->start();
 
-            yield $process->start();
-            self::assertTrue($process->isRunning());
-            Loop::defer(function () use ($ssh) {
-                $ssh->close();
-            });
-            $exitCode = yield $process->join();
-            self::assertFalse($exitCode, false);
-        });
+        self::assertTrue($process->isRunning());
+
+        EventLoop::queue(static fn () => $ssh->close());
+
+        self::assertFalse($process->join());
+    }
+
+    /**
+     * Cancelling a join detaches the caller only: the remote process keeps
+     * running and a later join still observes its exit status.
+     */
+    public function testCancellingJoinLeavesProcessRunning() {
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'sleep 1; echo done');
+
+        $process->start();
+
+        try {
+            $process->join(new TimeoutCancellation(0.1));
+            self::fail('Expected the join to be cancelled');
+        } catch (CancelledException) {
+            // expected
+        }
+
+        self::assertTrue($process->isRunning(), 'Cancelling join() must not kill the process');
+        self::assertSame(0, $process->join(new TimeoutCancellation(10)));
+
+        $ssh->close();
+    }
+
+    /**
+     * Several processes must be able to share one connection.
+     *
+     * Channel multiplexing had no coverage at all before, even though it is the
+     * entire point of the dispatcher.
+     */
+    public function testConcurrentProcessesOnOneConnection() {
+        $ssh = $this->getSsh();
+
+        $processes = [];
+
+        foreach (['echo one', 'echo two', 'echo three'] as $command) {
+            $process = new Process($ssh, $command);
+            $process->start();
+            $processes[] = $process;
+        }
+
+        $outputs = Future\await(\array_map(
+            static fn (Process $process) => async(static function () use ($process): string {
+                $process->join();
+
+                return ByteStream\buffer($process->getStdout());
+            }),
+            $processes
+        ));
+
+        self::assertSame(["one\n", "two\n", "three\n"], $outputs);
+
+        $ssh->close();
+    }
+
+    /**
+     * One process whose output nobody reads must not stall another.
+     *
+     * On v2 the dispatcher awaited every emit, so an unread stdout blocked the
+     * single read loop and with it every other channel on the connection.
+     */
+    public function testUnreadOutputDoesNotStallAnotherProcess() {
+        $ssh = $this->getSsh();
+
+        $ignored = new Process($ssh, 'head -c 200000 /dev/zero');
+        $ignored->start();
+
+        $active = new Process($ssh, 'echo still-moving');
+        $active->start();
+
+        self::assertSame(0, $active->join(new TimeoutCancellation(10)));
+        self::assertSame("still-moving\n", ByteStream\buffer($active->getStdout()));
+
+        $ssh->close();
+    }
+
+    /**
+     * The exit status can arrive before the output has been consumed; the
+     * buffered output must still be readable in full afterwards.
+     */
+    public function testOutputIsCompleteAfterExitStatus() {
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'seq 1 500');
+
+        $process->start();
+
+        self::assertSame(0, $process->join());
+
+        $output = ByteStream\buffer($process->getStdout());
+        $lines = \explode("\n", \trim($output));
+
+        self::assertCount(500, $lines);
+        self::assertSame('1', $lines[0]);
+        self::assertSame('500', $lines[499]);
+
+        $ssh->close();
+    }
+
+    /**
+     * A write far larger than the peer's maximum packet size must survive the
+     * round trip intact, which means it has to be split and paced against the
+     * window rather than shoved out as one oversized message.
+     */
+    public function testLargeStdinWrite() {
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'cat');
+
+        $process->start();
+
+        $payload = \str_repeat('0123456789abcdef', 64 * 1024); // 1 MiB
+
+        $process->getStdin()->write($payload);
+        $process->getStdin()->end();
+
+        $output = ByteStream\buffer($process->getStdout());
+
+        self::assertSame(\strlen($payload), \strlen($output));
+        self::assertSame($payload, $output);
+        self::assertSame(0, $process->join(new TimeoutCancellation(30)));
+
+        $ssh->close();
+    }
+
+    /**
+     * Reading far more than the advertised receive window only works if the
+     * client keeps topping that window back up.
+     */
+    public function testLargeStdoutRead() {
+        $ssh = $this->getSsh();
+        $process = new Process($ssh, 'head -c 5000000 /dev/zero');
+
+        $process->start();
+
+        $output = ByteStream\buffer($process->getStdout());
+
+        self::assertSame(5000000, \strlen($output));
+        self::assertSame(0, $process->join(new TimeoutCancellation(30)));
+
+        $ssh->close();
     }
 }

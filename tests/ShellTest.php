@@ -1,233 +1,205 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Tests;
 
-use function Amp\call;
-use Amp\Loop;
-use Amp\Ssh\Authentication\UsernamePassword;
+use function Amp\async;
 use Amp\Ssh\Channel\ChannelException;
-use function Amp\Ssh\connect;
 use Amp\Ssh\Shell;
-use Amp\Ssh\SshResource;
 use Amp\Ssh\StatusError;
-use PHPUnit\Framework\TestCase;
+use Amp\TimeoutCancellation;
+use Revolt\EventLoop;
 
-class ShellTest extends TestCase {
-    protected function getSsh() {
-        return call(function () {
-            $authentication = new UsernamePassword('root', 'root');
+class ShellTest extends IntegrationTestCase {
+    /**
+     * Reads the shell's output until the marker shows up, so the assertion does
+     * not depend on how the server chunks it.
+     */
+    private function readUntil(Shell $shell, string $needle, float $timeout = 10): string {
+        $cancellation = new TimeoutCancellation($timeout);
+        $output = '';
 
-            return yield connect('127.0.0.1:2222', $authentication, LoggerTest::get());
-        });
+        while (($chunk = $shell->getStdout()->read($cancellation)) !== null) {
+            $output .= $chunk;
+
+            if (\str_contains($output, $needle)) {
+                break;
+            }
+        }
+
+        return $output;
     }
 
     public function testShell() {
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $shell = new Shell($ssh);
+        $ssh = $this->getSsh();
+        $shell = new Shell($ssh);
 
-            yield $shell->start();
-            yield $shell->getStdin()->write("echo foo; exit\n");
+        $shell->start();
+        $shell->getStdin()->write("echo foo; exit\n");
 
-            self::assertTrue($shell->isRunning());
+        self::assertTrue($shell->isRunning());
 
-            $exitCode = yield $shell->join();
-            $output = '';
+        $output = $this->readUntil($shell, 'foo');
+        $exitCode = $shell->join();
 
-            while ($read = yield $shell->getStdout()->read()) {
-                $output .= $read;
-            }
+        self::assertFalse($shell->isRunning());
+        self::assertStringContainsString('foo', $output);
+        self::assertSame(0, $exitCode);
 
-            self::assertFalse($shell->isRunning());
-            self::assertContains('foo', $output);
-            self::assertEquals(0, $exitCode);
-
-            yield $ssh->close();
-        });
+        $ssh->close();
     }
 
     public function testShellNotStartedOnJoin() {
-        self::expectException(StatusError::class);
+        $ssh = $this->getSsh();
+        $shell = new Shell($ssh);
 
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $shell = new Shell($ssh);
+        $this->expectException(StatusError::class);
 
-            yield $shell->join();
-        });
+        try {
+            $shell->join();
+        } finally {
+            $ssh->close();
+        }
     }
 
     public function testShellNotStartedOnSignal() {
-        self::expectException(StatusError::class);
+        $ssh = $this->getSsh();
+        $shell = new Shell($ssh);
 
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $shell = new Shell($ssh);
+        $this->expectException(StatusError::class);
 
-            yield $shell->signal(SIGKILL);
-        });
+        try {
+            $shell->signal(9);
+        } finally {
+            $ssh->close();
+        }
     }
 
     public function testShellAlreadyStarted() {
-        self::expectException(StatusError::class);
+        $ssh = $this->getSsh();
+        $shell = new Shell($ssh);
 
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $shell = new Shell($ssh);
+        $shell->start();
 
-            yield $shell->start();
-            yield $shell->start();
-        });
+        $this->expectException(StatusError::class);
+
+        try {
+            $shell->start();
+        } finally {
+            $ssh->close();
+        }
     }
-
 
     public function testShellEnv() {
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $shell = new Shell($ssh, ['FOO' => 'bar']);
+        $ssh = $this->getSsh();
+        $shell = new Shell($ssh, ['FOO' => 'bar']);
 
-            yield $shell->start();
-            self::assertTrue($shell->isRunning());
+        $shell->start();
 
-            yield $shell->getStdin()->write("echo \$FOO; exit\n");
+        self::assertTrue($shell->isRunning());
 
-            $exitCode = yield $shell->join();
-            $output = '';
+        $shell->getStdin()->write("echo \$FOO; exit\n");
 
-            while ($read = yield $shell->getStdout()->read()) {
-                $output .= $read;
-            }
+        $output = $this->readUntil($shell, 'bar');
+        $exitCode = $shell->join();
 
-            self::assertFalse($shell->isRunning());
-            self::assertContains('bar', $output);
-            self::assertEquals(0, $exitCode);
+        self::assertFalse($shell->isRunning());
+        self::assertStringContainsString('bar', $output);
+        self::assertSame(0, $exitCode);
 
-            $exitCode = yield $shell->join();
+        // join() is repeatable.
+        self::assertSame(0, $shell->join());
 
-            self::assertEquals(0, $exitCode);
-
-            yield $ssh->close();
-        });
+        $ssh->close();
     }
 
+    /**
+     * "0" is falsy in PHP; writing and reading it must not be mistaken for EOF.
+     */
     public function testStdInZero() {
-        Loop::run(function () {
-            $sshResource = yield $this->getSsh();
+        $ssh = $this->getSsh();
+        $shell = new Shell($ssh);
 
-            $shell = new Shell($sshResource);
-            yield $shell->start();
+        $shell->start();
 
+        async(fn () => $shell->join());
 
-            \Amp\asyncCall(function () use ($shell) {
-                yield $shell->join();
-            });
+        $this->readUntil($shell, ':~#');
 
-            // read greeting from server
-            while ($chunk = yield $shell->getStdout()->read()) {
-                if (\strpos($chunk, ':~#') !== false) {
-                    break;
-                }
-            }
-            // enter 1 in terminal
-            yield $shell->getStdin()->write(1);
-            $this->assertEquals(1, yield $shell->getStdout()->read());
-            // try enter 0
-            yield $shell->getStdin()->write(0);
-            $this->assertEquals(0, yield \Amp\Promise\timeout($shell->getStdout()->read(), 10));
-            yield $sshResource->close();
-        });
+        $shell->getStdin()->write('1');
+        self::assertSame('1', $shell->getStdout()->read(new TimeoutCancellation(10)));
+
+        $shell->getStdin()->write('0');
+        self::assertSame('0', $shell->getStdout()->read(new TimeoutCancellation(10)));
+
+        $ssh->close();
     }
 
     public function testShellStartWindowSize() {
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $shell = new Shell($ssh);
+        $ssh = $this->getSsh();
+        $shell = new Shell($ssh);
 
-            yield $shell->start(120, 39);
-            self::assertTrue($shell->isRunning());
+        $shell->start(120, 39);
 
-            yield $shell->getStdin()->write("stty size; exit\n");
+        self::assertTrue($shell->isRunning());
 
-            $exitCode = yield $shell->join();
-            $output = '';
+        $shell->getStdin()->write("stty size; exit\n");
 
-            while ($read = yield $shell->getStdout()->read()) {
-                $output .= $read;
-            }
+        $output = $this->readUntil($shell, '39 120');
+        $exitCode = $shell->join();
 
-            self::assertFalse($shell->isRunning());
-            self::assertContains('39 120', $output);
-            self::assertEquals(0, $exitCode);
+        self::assertFalse($shell->isRunning());
+        self::assertStringContainsString('39 120', $output);
+        self::assertSame(0, $exitCode);
 
-            yield $ssh->close();
-        });
+        $ssh->close();
     }
 
     public function testShellChangeWindowSize() {
-        Loop::run(function () {
-            $ssh = yield $this->getSsh();
-            $shell = new Shell($ssh);
+        $ssh = $this->getSsh();
+        $shell = new Shell($ssh);
 
-            yield $shell->start();
-            self::assertTrue($shell->isRunning());
+        $shell->start();
 
-            yield $shell->changeWindowSize(120, 39);
-            yield $shell->getStdin()->write("stty size; exit\n");
+        self::assertTrue($shell->isRunning());
 
-            $exitCode = yield $shell->join();
-            $output = '';
+        $shell->changeWindowSize(120, 39);
+        $shell->getStdin()->write("stty size; exit\n");
 
-            while ($read = yield $shell->getStdout()->read()) {
-                $output .= $read;
-            }
+        $output = $this->readUntil($shell, '39 120');
+        $exitCode = $shell->join();
 
-            self::assertFalse($shell->isRunning());
-            self::assertContains('39 120', $output);
-            self::assertEquals(0, $exitCode);
+        self::assertFalse($shell->isRunning());
+        self::assertStringContainsString('39 120', $output);
+        self::assertSame(0, $exitCode);
 
-            yield $ssh->close();
-        });
+        $ssh->close();
     }
 
-    /**
-     * If connection closed by server and process started then fail with channel error.
-     */
     public function testShellFailOnDisconnect() {
+        $ssh = $this->getSsh();
+        $shell = new Shell($ssh);
+
+        $shell->start();
+
+        self::assertTrue($shell->isRunning());
+
+        EventLoop::queue(static fn () => NetworkHelper::disconnect($ssh));
+
         $this->expectException(ChannelException::class);
-        Loop::run(function () {
-            /** @var SshResource $ssh */
-            $ssh = yield $this->getSsh();
 
-            $shell = new Shell($ssh);
-
-            yield $shell->start();
-            self::assertTrue($shell->isRunning());
-            Loop::defer(function () use ($ssh) {
-                NetworkHelper::disconnect($ssh);
-            });
-            yield $shell->join();
-        });
+        $shell->join();
     }
 
-    /**
-     * If channel closed then join must resolve with false exitCode
-     * Some implementations doesn't send exit code.
-     * In that cases false must be used.
-     */
     public function testShellFinishWithFalseOnChannelClose() {
-        Loop::run(function () {
-            /** @var SshResource $ssh */
-            $ssh = yield $this->getSsh();
+        $ssh = $this->getSsh();
+        $shell = new Shell($ssh);
 
-            $shell = new Shell($ssh);
+        $shell->start();
 
-            yield $shell->start();
-            self::assertTrue($shell->isRunning());
-            Loop::defer(function () use ($ssh) {
-                $ssh->close();
-            });
-            $exitCode = yield $shell->join();
-            self::assertFalse($exitCode, false);
-        });
+        self::assertTrue($shell->isRunning());
+
+        EventLoop::queue(static fn () => $ssh->close());
+
+        self::assertFalse($shell->join());
     }
 }

@@ -1,11 +1,7 @@
-<?php
+<?php declare(strict_types=1);
 
 namespace Amp\Ssh\Tests\Negotiator;
 
-use function Amp\call;
-use Amp\Loop;
-use function Amp\Promise\timeout;
-use Amp\Ssh\Authentication\AuthenticationFailureException;
 use Amp\Ssh\Authentication\UsernamePassword;
 use Amp\Ssh\Channel\Dispatcher;
 use Amp\Ssh\Encryption\Decryption;
@@ -13,166 +9,164 @@ use Amp\Ssh\Encryption\Encryption;
 use Amp\Ssh\KeyExchange\KeyExchange;
 use Amp\Ssh\Mac\Mac;
 use Amp\Ssh\Negotiator;
+use function Amp\Ssh\read_server_identification;
 use Amp\Ssh\SshResource;
+use Amp\Ssh\Tests\IntegrationTestCase;
 use Amp\Ssh\Tests\LoggerTest;
+use Amp\Ssh\Tests\SshServer;
 use Amp\Ssh\Transport\LoggerHandler;
 use Amp\Ssh\Transport\MessageHandler;
 use Amp\Ssh\Transport\PayloadHandler;
-use PHPUnit\Framework\TestCase;
+use Amp\TimeoutCancellation;
 
-class NegotiatorTest extends TestCase {
-    protected function getSsh(Negotiator $negotiator) {
-        return call(function () use ($negotiator) {
-            $uri = "127.0.0.1:2222";
-            $authentication = new UsernamePassword('root', 'root');
-            $identification = 'SSH-2.0-AmpSSH_0.1';
-            $logger = LoggerTest::get();
+/**
+ * Exercises one algorithm at a time against a real server.
+ *
+ * Amp\Ssh\connect() always offers the full set, so the only way to prove a
+ * single cipher, MAC or key exchange actually interoperates is to build the
+ * handler stack by hand around a Negotiator that offers just that one.
+ */
+class NegotiatorTest extends IntegrationTestCase {
+    protected function connectWith(Negotiator $negotiator): SshResource {
+        // SshServer::uri(), never a literal address. This used to dial
+        // 127.0.0.1:2222 whatever SSH_LOCAL_HOST said, so pointing the suite at
+        // a server somewhere else still sent that server's user name and
+        // password to whatever happened to be listening on the local port.
+        $uri = SshServer::uri();
+        $authentication = new UsernamePassword(SshServer::user(), SshServer::password());
+        $identification = 'SSH-2.0-AmpSSH_0.1';
+        $logger = LoggerTest::get();
 
+        $socket = \Amp\Socket\connect($uri);
 
-            $socket = yield \Amp\Socket\connect($uri);
+        try {
+            $socket->write($identification . "\r\n");
 
-            yield $socket->write($identification . "\r\n");
+            $remainder = '';
+            $serverIdentification = read_server_identification($socket, $remainder, null);
 
-            /*
-            The server MAY send other lines of data before sending the version
-            string.  Each line SHOULD be terminated by a Carriage Return and Line
-            Feed.  Such lines MUST NOT begin with "SSH-", and SHOULD be encoded
-            in ISO-10646 UTF-8 [RFC3629] (language is not specified).  Clients
-            MUST be able to process such lines.  Such lines MAY be silently
-            ignored, or MAY be displayed to the client user.
-            */
-            $serverIdentification = null;
-            $buffer = '';
-
-            while ($serverIdentification === null) {
-                $chunk = yield $socket->read();
-                if ($chunk === null) {
-                    throw new AuthenticationFailureException('Could not read server identification: connection closed during read');
-                }
-
-                $buffer .= $chunk;
-
-                if (($linePos = \strpos($buffer, "\n")) !== false) {
-                    $line = \substr($buffer, 0, $linePos);
-
-                    if (\strpos($line, 'SSH-') === 0) {
-                        // OpenSSH before 7.5 does not always send CR before LF
-                        $serverIdentification = \rtrim($line, "\r");
-                    }
-
-                    $buffer = \substr($buffer, $linePos + 1);
-                }
-            }
-
-            $payloadHandler = new PayloadHandler($socket, $buffer);
+            $payloadHandler = new PayloadHandler($socket, $remainder);
             $messageHandler = MessageHandler::create($payloadHandler);
             $loggerHandler = new LoggerHandler($messageHandler, $logger);
 
-            $cryptedHandler = yield $negotiator->negotiate($loggerHandler, $serverIdentification, $identification);
+            $cryptedHandler = $negotiator->negotiate($loggerHandler, $serverIdentification, $identification);
 
-            yield timeout($authentication->authenticate($cryptedHandler, $negotiator->getSessionId()), 1000);
+            $authentication->authenticate(
+                $cryptedHandler,
+                $negotiator->getSessionId(),
+                // Generous on purpose: this bounds a hung test, and one second
+                // was a local-container assumption that a server a few network
+                // hops away misses on latency alone.
+                new TimeoutCancellation(10)
+            );
 
             $dispatcher = new Dispatcher($cryptedHandler);
             $dispatcher->start();
 
             return new SshResource($cryptedHandler, $dispatcher);
-        });
+        } catch (\Throwable $exception) {
+            $socket->close();
+
+            // The algorithm under test is one this server does not offer, which
+            // is a fact about the server rather than a defect: current OpenSSH
+            // has disabled the CBC ciphers and group14-sha1, and
+            // docker/legacy.Dockerfile exists to provide a server that still
+            // has them. Skipping rather than failing keeps the suite meaningful
+            // against whatever sshd it is pointed at - it proves the algorithms
+            // that server actually supports, and says plainly which ones it
+            // could not be asked about.
+            if ($exception instanceof \RuntimeException
+                && \str_starts_with($exception->getMessage(), 'No common ')) {
+                self::markTestSkipped($exception->getMessage());
+            }
+
+            throw $exception;
+        }
     }
 
     /**
      * @dataProvider keyExchanges
-     * @param KeyExchange $keyExchange
      */
     public function testKeyExchange(KeyExchange $keyExchange) {
-        Loop::run(function () use ($keyExchange) {
-            $negotiator = new NegotiatorBuilder();
-            $negotiator->addKeyExchange($keyExchange);
-            $negotiator->addEncryptions();
-            $negotiator->addDecryptions();
-            $negotiator->addMacs();
+        $negotiator = new NegotiatorBuilder();
+        $negotiator->addKeyExchange($keyExchange);
+        $negotiator->addEncryptions();
+        $negotiator->addDecryptions();
+        $negotiator->addMacs();
 
-            $sshResource = yield $this->getSsh($negotiator->get());
-            self::assertInstanceOf(SshResource::class, $sshResource);
-        });
+        $sshResource = $this->connectWith($negotiator->get());
+        self::assertInstanceOf(SshResource::class, $sshResource);
+        $sshResource->close();
     }
 
     /**
      * @dataProvider encryptions
-     * @param Encryption $encryption
      */
     public function testEncryption(Encryption $encryption) {
-        Loop::run(function () use ($encryption) {
-            $negotiator = new NegotiatorBuilder();
-            $negotiator->addKeyExchanges();
-            $negotiator->addEncryption($encryption);
-            $negotiator->addDecryptions();
-            $negotiator->addMacs();
+        $negotiator = new NegotiatorBuilder();
+        $negotiator->addKeyExchanges();
+        $negotiator->addEncryption($encryption);
+        $negotiator->addDecryptions();
+        $negotiator->addMacs();
 
-            $sshResource = yield $this->getSsh($negotiator->get());
-            self::assertInstanceOf(SshResource::class, $sshResource);
-            yield $sshResource->close();
-        });
+        $sshResource = $this->connectWith($negotiator->get());
+        self::assertInstanceOf(SshResource::class, $sshResource);
+        $sshResource->close();
     }
 
     /**
      * @dataProvider decryptions
-     * @param Decryption $decryption
      */
     public function testDecryption(Decryption $decryption) {
-        Loop::run(function () use ($decryption) {
-            $negotiator = new NegotiatorBuilder();
-            $negotiator->addKeyExchanges();
-            $negotiator->addDecryption($decryption);
-            $negotiator->addEncryptions();
-            $negotiator->addMacs();
+        $negotiator = new NegotiatorBuilder();
+        $negotiator->addKeyExchanges();
+        $negotiator->addDecryption($decryption);
+        $negotiator->addEncryptions();
+        $negotiator->addMacs();
 
-            $sshResource = yield $this->getSsh($negotiator->get());
-            self::assertInstanceOf(SshResource::class, $sshResource);
-        });
+        $sshResource = $this->connectWith($negotiator->get());
+        self::assertInstanceOf(SshResource::class, $sshResource);
+        $sshResource->close();
     }
 
     /**
      * @dataProvider macs
-     * @param Mac $mac
      */
     public function testMacs(Mac $mac) {
-        Loop::run(function () use ($mac) {
-            $negotiator = new NegotiatorBuilder();
-            $negotiator->addKeyExchanges();
-            $negotiator->addEncryptions();
-            $negotiator->addDecryptions();
-            $negotiator->addMac($mac);
+        $negotiator = new NegotiatorBuilder();
+        $negotiator->addKeyExchanges();
+        $negotiator->addEncryptions();
+        $negotiator->addDecryptions();
+        $negotiator->addMac($mac);
 
-            $sshResource = yield $this->getSsh($negotiator->get());
-            self::assertInstanceOf(SshResource::class, $sshResource);
-        });
+        $sshResource = $this->connectWith($negotiator->get());
+        self::assertInstanceOf(SshResource::class, $sshResource);
+        $sshResource->close();
     }
 
-    public function provider($items) {
+    public function provider(iterable $items): array {
         $result = [];
+
         foreach ($items as $item) {
             $result[] = [$item];
         }
+
         return $result;
     }
 
-    public function keyExchanges() {
+    public function keyExchanges(): array {
         return $this->provider(Negotiator::supportedKeyExchanges());
     }
 
-    public function dataName() {
-        return parent::dataName(); // TODO: Change the autogenerated stub
-    }
-
-    public function encryptions() {
+    public function encryptions(): array {
         return $this->provider(Negotiator::supportedEncryptions());
     }
 
-    public function decryptions() {
+    public function decryptions(): array {
         return $this->provider(Negotiator::supportedDecryptions());
     }
 
-    public function macs() {
+    public function macs(): array {
         return $this->provider(Negotiator::supportedMacs());
     }
 }
