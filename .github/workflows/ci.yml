@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  # Nothing here needs a server: the integration tests skip themselves unless
+  # SSH_LOCAL_HOST is set, so this must pass on every supported version.
+  unit:
+    name: Unit / PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: sodium, openssl
+          coverage: none
+          ini-values: zend.assertions=1
+
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+
+      - name: Validate composer.json
+        run: composer validate --strict
+
+      - name: Run tests
+        run: composer test
+
+  lint:
+    name: Code style
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          extensions: sodium, openssl
+          coverage: none
+
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+
+      - name: Check code style
+        run: composer lint
+
+  # The full suite against a real sshd. The server is configured inside the job
+  # rather than as a service container, which would mean publishing an image
+  # first for no benefit.
+  integration:
+    name: Integration (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Restores what current OpenSSH disables: ssh-rsa, CBC, hmac-sha1.
+          - mode: legacy
+            setup: legacy
+            rekey_limit: '4G none'
+
+          # Stock configuration, so ssh-rsa is refused and only the SHA-2
+          # signatures and Ed25519 can get in.
+          - mode: modern
+            setup: modern
+            rekey_limit: '4G none'
+
+          # Forces a key re-exchange every kilobyte, so the large transfer
+          # tests trigger dozens of them mid-session.
+          - mode: rekey
+            setup: legacy
+            rekey_limit: '1K none'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: sodium, openssl
+          coverage: none
+
+      - name: Install dependencies
+        uses: ramsey/composer-install@v3
+
+      - name: Start test sshd
+        run: sudo -E sh docker/setup-test-sshd.sh ${{ matrix.setup }}
+        env:
+          SSH_LOCAL_PORT: '2222'
+          SSH_REKEY_LIMIT: ${{ matrix.rekey_limit }}
+
+      - name: Run tests
+        run: composer test
+        env:
+          AMP_DEBUG: 'true'
+          SSH_LOCAL_HOST: 127.0.0.1
+          SSH_LOCAL_PORT: '2222'
+          SSH_LOCAL_USER: root
+          SSH_LOCAL_PASSWORD: root
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          cat debug.log || true
+          sudo cat /tmp/sshd.log || true
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: debug-log-${{ matrix.mode }}
+          path: debug.log
+          if-no-files-found: ignore
