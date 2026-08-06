@@ -1,34 +1,55 @@
-<?php
+<?php declare(strict_types=1);
 
-require_once __DIR__ . '/../vendor/autoload.php';
+// The smallest shell that works. See pty-shell.php for terminal size, TERM,
+// raw mode and resize handling.
 
-Amp\Loop::run(function () {
-    $username = \get_current_user();
-    $home = \getenv('HOME');
+require_once __DIR__ . '/bootstrap.php';
 
-    $authentication = new \Amp\Ssh\Authentication\PublicKey($username, $home . '/.ssh/id_rsa');
-    $sshResource = yield \Amp\Ssh\connect('127.0.0.1:22', $authentication);
+use function Amp\async;
+use Amp\ByteStream;
+use Amp\CancelledException;
+use Amp\Future;
+use Amp\TimeoutCancellation;
 
-    $shell = new \Amp\Ssh\Shell($sshResource);
-    yield $shell->start();
+$authentication = new \Amp\Ssh\Authentication\PublicKey($username, $keyPath);
+$sshResource = \Amp\Ssh\connect($target, $authentication);
 
-    \Amp\ByteStream\pipe($shell->getStderr(), new \Amp\ByteStream\ResourceOutputStream(STDERR));
-    \Amp\ByteStream\pipe($shell->getStdout(), new \Amp\ByteStream\ResourceOutputStream(STDOUT));
+$shell = new \Amp\Ssh\Shell($sshResource);
+$shell->start();
 
-    $stdin = new \Amp\ByteStream\ResourceInputStream(STDIN);
+$piping = [
+    async(fn () => ByteStream\pipe($shell->getStdout(), ByteStream\getStdout())),
+    async(fn () => ByteStream\pipe($shell->getStderr(), ByteStream\getStderr())),
+];
 
-    \Amp\asyncCall(function () use ($shell, $stdin) {
-        yield $shell->join();
-        $stdin->close();
-    });
+$stdin = ByteStream\getStdin();
 
-    while ($shell->isRunning()) {
-        $read = yield $stdin->read();
+async(function () use ($shell, $stdin): void {
+    $shell->join();
+    $stdin->close();
+});
 
-        if ($read !== null) {
-            yield $shell->getStdin()->write($read);
-        }
+while ($shell->isRunning()) {
+    $read = $stdin->read();
+
+    if ($read === null) {
+        break;
     }
 
-    yield $sshResource->close();
-});
+    // The shell may have exited while that read was pending. Writing to a
+    // stream that has already ended now throws instead of being swallowed.
+    if (!$shell->getStdin()->isWritable()) {
+        break;
+    }
+
+    $shell->getStdin()->write($read);
+}
+
+// Let the last of the output through before the connection goes away, but do
+// not wait on a shell that is still producing it.
+try {
+    Future\await($piping, new TimeoutCancellation(2));
+} catch (CancelledException) {
+}
+
+$sshResource->close();
