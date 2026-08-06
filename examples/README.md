@@ -22,6 +22,7 @@ SSH_HOST=example.com SSH_USER=deploy php examples/process.php
 | [`error-handling.php`](./error-handling.php) | Which exception each kind of failure throws, and why a non-zero exit is not one. |
 | [`pty-shell.php`](./pty-shell.php) | An interactive shell with the right terminal size, `TERM`, raw mode and resize handling. |
 | [`env-and-cwd.php`](./env-and-cwd.php) | Working directory and environment variables, including the `AcceptEnv` refusal. |
+| [`tunnel.php`](./tunnel.php) | Reaching something only the server can reach, through a socket that happens to be an SSH channel. |
 
 If you are new to the library, read them in that order: the first two show the shape of the API,
 and the rest each answer one question that comes up as soon as it is used for real work.

@@ -27,6 +27,33 @@ class SshResource {
     }
 
     /**
+     * Has the server connect to an address, and hands back the other end.
+     *
+     * The returned Tunnel is an Amp\Socket\Socket, so anything that takes one
+     * can be pointed through it. The address is resolved by the server, which
+     * is the point: it reaches what the server can reach.
+     *
+     * The originator is what the server records and matches its own "from"
+     * rules against. It is advisory - nothing verifies it - so the loopback
+     * default is a reasonable statement that the connection began here.
+     *
+     * @throws Channel\ChannelException If the server refuses to open it, which
+     *                                  is what a refused connection on the far
+     *                                  side looks like from here.
+     */
+    public function createTunnel(
+        string $host,
+        int $port,
+        string $originatorHost = '127.0.0.1',
+        int $originatorPort = 0
+    ): Tunnel {
+        $channel = $this->dispatcher->createDirectTcpIp($host, $port, $originatorHost, $originatorPort);
+        $channel->open();
+
+        return new Tunnel($channel);
+    }
+
+    /**
      * Orderly shutdown.
      *
      * Channels are completed first, so consumers see a clean end of stream

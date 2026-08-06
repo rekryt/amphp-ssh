@@ -140,6 +140,16 @@ abstract class Channel {
         return $this->channelId;
     }
 
+    /**
+     * What this channel type appends to the open request, already encoded.
+     *
+     * A session appends nothing, which is why this defaults to empty; a
+     * forwarding channel names the address it wants reached.
+     */
+    protected function getOpenExtraData(): string {
+        return '';
+    }
+
     public function getDataIterator(): ConcurrentIterator {
         return $this->dataIterator;
     }
@@ -213,6 +223,7 @@ abstract class Channel {
         $channelOpen->channelType = $this->getType();
         $channelOpen->initialWindowSize = self::LOCAL_WINDOW_SIZE;
         $channelOpen->maximumPacketSize = self::LOCAL_MAX_PACKET_SIZE;
+        $channelOpen->extraData = $this->getOpenExtraData();
 
         $this->writer->write($channelOpen);
 

@@ -217,4 +217,33 @@ class Dispatcher {
 
         return $session;
     }
+
+    /**
+     * A channel the server opens towards an address of our choosing.
+     *
+     * @see createSession() for why iterate() is called exactly once.
+     */
+    public function createDirectTcpIp(
+        string $host,
+        int $port,
+        string $originatorHost,
+        int $originatorPort
+    ): DirectTcpIp {
+        $queue = new Queue();
+
+        $channel = new DirectTcpIp(
+            $this->handler,
+            $queue->iterate(),
+            $this->channelSequence,
+            $host,
+            $port,
+            $originatorHost,
+            $originatorPort
+        );
+
+        $this->channelQueues[$this->channelSequence] = $queue;
+        ++$this->channelSequence;
+
+        return $channel;
+    }
 }

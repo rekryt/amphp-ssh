@@ -19,6 +19,15 @@ final class ChannelOpen implements Message {
 
     public $maximumPacketSize = 0x4000;
 
+    /**
+     * Whatever the channel type adds after the header, already encoded.
+     *
+     * RFC 4254 gives each type its own tail: a session has none, while
+     * direct-tcpip carries the address to connect to and the address it is
+     * being connected from.
+     */
+    public string $extraData = '';
+
     public function encode(): string {
         return \pack(
             'CNa*N3',
@@ -28,7 +37,7 @@ final class ChannelOpen implements Message {
             $this->senderChannel,
             $this->initialWindowSize,
             $this->maximumPacketSize
-        );
+        ) . $this->extraData;
     }
 
     public static function decode(string $payload) {

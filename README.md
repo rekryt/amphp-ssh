@@ -67,6 +67,34 @@ The [`examples`](./examples) directory covers the rest: running one command on m
 reusing a connection, streaming large output, piping data into a remote command, host key pinning,
 every authentication method, and which exception each kind of failure throws.
 
+### Tunnels
+
+`createTunnel()` asks the server to connect somewhere and hands back the other end of that
+connection. The address is resolved and dialled by the server, so it reaches whatever the server
+can reach — a database on a private network, a port bound to the server's own loopback:
+
+```php
+$tunnel = $ssh->createTunnel('db.internal', 5432);
+
+$tunnel->write($query);
+$response = $tunnel->read();
+
+$tunnel->close();
+```
+
+The result is an [`Amp\Socket\Socket`](https://github.com/amphp/socket), so anything that takes a
+socket can be pointed through it without knowing SSH is involved. Tunnels are ordinary channels:
+open as many as the server's `MaxSessions` allows, alongside commands, on the one connection, and
+closing one closes only that one.
+
+TLS is the exception. PHP sets it up in the stream layer, on a socket resource, and a tunnel is a
+channel inside the SSH connection rather than a socket of its own — `isTlsConfigurationAvailable()`
+returns `false` and `setupTls()` throws. The hop between you and the server is encrypted by SSH
+either way; what is not available is TLS running from here to the far end.
+
+A connection the server could not make arrives as a `ChannelException` carrying the reason the
+server gave for it.
+
 ### Host key verification
 
 `connect()` checks the server against `~/.ssh/known_hosts` by default and refuses to continue if
