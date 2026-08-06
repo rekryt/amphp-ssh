@@ -5,6 +5,7 @@ namespace Amp\Ssh;
 use Amp\Cancellation;
 use Amp\Socket\ConnectContext;
 use Amp\Socket\Socket;
+use Amp\Socket\SocketConnector;
 use Amp\Ssh\Authentication\Authentication;
 use Amp\Ssh\Channel\Dispatcher;
 use Amp\Ssh\HostKey\HostKeyVerifier;
@@ -27,6 +28,11 @@ use Psr\Log\NullLogger;
  *
  * Once the resource has been returned, cancellation no longer applies to it;
  * shutting down is an explicit SshResource::close() call.
+ *
+ * A connector, when given, replaces the process-wide default from
+ * Amp\Socket\socketConnector() for this connection only. Reaching the server
+ * through a proxy, or through another SSH tunnel, is a per-connection
+ * decision and should not require swapping global state.
  */
 function connect(
     string $uri,
@@ -35,7 +41,8 @@ function connect(
     string $identification = 'SSH-2.0-AmpSSH_0.1',
     ?Cancellation $cancellation = null,
     ?ConnectContext $connectContext = null,
-    ?HostKeyVerifier $hostKeyVerifier = null
+    ?HostKeyVerifier $hostKeyVerifier = null,
+    ?SocketConnector $connector = null
 ): SshResource {
     $logger = $logger ?? new NullLogger();
 
@@ -44,7 +51,7 @@ function connect(
     // does it rather than being what happens when nobody thought about it.
     $hostKeyVerifier = $hostKeyVerifier ?? new KnownHosts();
 
-    $socket = \Amp\Socket\connect($uri, $connectContext, $cancellation);
+    $socket = ($connector ?? \Amp\Socket\socketConnector())->connect($uri, $connectContext, $cancellation);
 
     try {
         $socket->write($identification . "\r\n");

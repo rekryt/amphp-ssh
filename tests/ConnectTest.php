@@ -3,6 +3,7 @@
 namespace Amp\Ssh\Tests;
 
 use function Amp\async;
+use Amp\Cancellation;
 use Amp\CancelledException;
 use Amp\DeferredFuture;
 use Amp\PHPUnit\AsyncTestCase;
@@ -176,6 +177,58 @@ class ConnectTest extends AsyncTestCase {
         $this->expectException(ServerIdentificationException::class);
 
         $this->dial($address, 5);
+    }
+
+    /**
+     * A connector handed to connect() is the one that makes the TCP
+     * connection. That is what lets a caller route the connection through a
+     * proxy or another tunnel without swapping the process-wide connector.
+     */
+    public function testGivenConnectorMakesTheConnection() {
+        $address = $this->serve(static function (Socket\Socket $client): void {
+            $client->read();
+            $client->write("SSH-2.0-FakeServer_1.0\r\n");
+            // Say nothing further; the client waits for KEXINIT.
+        });
+
+        // Redirects every connection to the fake peer, so reaching that peer
+        // while dialing an unresolvable name proves this connector was used.
+        $connector = new class($address) implements Socket\SocketConnector {
+            public ?string $requestedUri = null;
+
+            public function __construct(private readonly string $address) {
+            }
+
+            public function connect(
+                Socket\SocketAddress|string $uri,
+                ?Socket\ConnectContext $context = null,
+                ?Cancellation $cancellation = null
+            ): Socket\Socket {
+                $this->requestedUri = (string) $uri;
+
+                return (new Socket\DnsSocketConnector())->connect($this->address, $context, $cancellation);
+            }
+        };
+
+        try {
+            connect(
+                'ssh.example.invalid:22',
+                new UsernamePassword('root', 'root'),
+                null,
+                'SSH-2.0-AmpSSH_0.1',
+                new TimeoutCancellation(0.3),
+                null,
+                null,
+                $connector
+            );
+            self::fail('Expected the handshake to be cancelled');
+        } catch (CancelledException) {
+            // The fake peer never answers the key exchange; getting as far as
+            // waiting on it proves the connection went through the connector.
+        }
+
+        self::assertSame('ssh.example.invalid:22', $connector->requestedUri);
+        $this->assertPeerSawEof();
     }
 
     /**

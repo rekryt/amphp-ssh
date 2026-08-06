@@ -8,7 +8,10 @@ use Amp\Ssh\Message\Disconnect;
 use Amp\Ssh\Transport\BinaryPacketHandler;
 
 /**
- * @internal
+ * An established, authenticated SSH connection.
+ *
+ * This is what connect() returns: the handle sessions and tunnels are created
+ * from, and the object that owns the connection's lifetime.
  */
 class SshResource {
     private BinaryPacketHandler $handler;
