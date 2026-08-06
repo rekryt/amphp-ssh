@@ -1,0 +1,20 @@
+# Everything here is text and is stored with LF, whatever the checkout
+# platform would otherwise do.
+* text=auto eol=lf
+
+# Keep the distribution archive to what the package needs at run time.
+#
+# `composer require` fetches the dist zip rather than cloning, so anything
+# marked here never reaches a consumer's vendor directory. Tests are the bulk
+# of it and they carry throwaway private keys, which have no business sitting
+# in someone else's tree; the rest is tooling that only ever runs in this
+# repository. The examples go too: each one resolves ../vendor/autoload.php,
+# which exists in a checkout and does not exist under vendor/amphp/ssh.
+/.github                export-ignore
+/docker                 export-ignore
+/examples               export-ignore
+/tests                  export-ignore
+/.gitattributes         export-ignore
+/.gitignore             export-ignore
+/.php-cs-fixer.dist.php export-ignore
+/phpunit.xml.dist       export-ignore
